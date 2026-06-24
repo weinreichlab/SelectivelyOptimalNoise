@@ -6,36 +6,34 @@ def wrightfishersampling(N: int, K: int) -> tuple[bool, int, list[list[int]]]:
     """
     Parameters: 
 
-    N = number of diploid individuals 
+    N = number of haploid individuals (and total alleles)
     K = current allele count 
 
     returns: 
     
     tuple: (fixation status, final generation, history list)
     """
-    # since it's a diploid population 
-    total_alleles = 2*N
 
     # input validation 
     if N<= 0: 
         raise ValueError("Population number must be greater than zero.")
     if K < 0: 
         raise ValueError("Number of alleles cannot be negative.")
-    if K > total_alleles: 
+    if K > N: 
         raise ValueError("K cannot be greater than the total alleles.")
     
     history = []
     t = 0 # time stars at 0 
     current_K = K 
 
-    while 0 < current_K < total_alleles: 
+    while 0 < current_K < N: 
         history.append([t, current_K])
-        p = current_K / total_alleles # calculating the allele frequency, p = K/2N
-        current_K = int(np.random.binomial(n = total_alleles, p=p)) # random sampling from binomial distribution for next generation
+        p = current_K / N # calculating the allele frequency, p = K/N
+        current_K = int(np.random.binomial(n = N, p=p)) # random sampling from binomial distribution for next generation
         t += 1 # updating the time to add a generation
     
     history.append([t, current_K])
-    fixed = (current_K == total_alleles) # true if fixed, false if the allele crashes
+    fixed = (current_K == N) # true if fixed, false if the allele crashes
 
     '''
     # removed for running larger simulations
@@ -59,7 +57,7 @@ def run_multiple_simulations(N: int, K:int, num_simulations: int) -> list[dict]:
             "fixed": fixed, 
             "final_generations": final_t,
             "generations": [step[0] for step in history], 
-            "frequencies": [step[1] / (2 * N) for step in history]
+            "frequencies": [step[1] / N for step in history]
         })
 
     return all_simulation_data
@@ -85,7 +83,7 @@ def plot_wright_fisher(simulation_results: list[dict], N: int, K: int):
 
         plt.plot(run["generations"], run["frequencies"], color=color, alpha=0.6, linewidth=1.5, label=label)
 
-    initial_freq = K / (2 * N)
+    initial_freq = K / N
     # Plot labels and styling
     plt.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, label='Fixation (p=1.0)')
     plt.axhline(y=0.0, color='black', linestyle=':', alpha=0.5, label='Extinction (p=0.0)')
@@ -102,10 +100,10 @@ def plot_wright_fisher(simulation_results: list[dict], N: int, K: int):
     
 #############################################
 #running the actual simulation, example
-POPULATION_SIZE = 50 
+POPULATION_SIZE = 100 
 INITIAL_ALLELES = 50
 
-#Note that the allele frequncy = population_size * 2 / initial_alleles 
+#Note that the allele frequncy = population_size / initial_alleles 
 
 NUM_RUNS = 100
 
