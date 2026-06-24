@@ -1,7 +1,6 @@
 import numpy as np 
 import matplotlib.pyplot as plt
 
-# defining the simulation 
 def wrightfishersampling(N: int, K: int) -> tuple[bool, int, list[list[int]]]:
     """
     Parameters: 
