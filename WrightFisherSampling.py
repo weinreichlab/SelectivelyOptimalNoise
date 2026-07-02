@@ -75,7 +75,7 @@ def wrightfishersampling(K: List[int], Ff: List[Callable[[int], int]]) -> tuple[
         pvals /= pvals.sum()
 
         # random multinomial is implented to select the next generation using the pvals as likelihoods of
-        # each allele. Note: we need to later change random multinomial
+        # each allele.
         try:
             new_counts = np.random.multinomial(n=N, pvals=pvals)
             current_K = new_counts.tolist()
