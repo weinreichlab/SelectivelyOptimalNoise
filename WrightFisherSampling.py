@@ -77,8 +77,28 @@ def wrightfishersampling(K: List[int], Ff: List[Callable[[int], int]]) -> tuple[
         # random multinomial is implented to select the next generation using the pvals as likelihoods of
         # each allele. Note: we need to later change random multinomial
         try:
-            new_counts = np.random.multinomial(n=N, pvals=pvals)
-            current_K = new_counts.tolist()
+            current_K = []
+            remaining = N
+
+            # Bernoulli implementation so we don't need to use random multinomial anymore
+            # iterate through all categories except the last one
+            for i in range(len(pvals) - 1):
+                p_current = pvals[i]
+
+                # conditional probability of having this allele
+                # given that the individual doesn't have a previous allele
+                p_conditional = p_current / sum(pvals[i:])
+
+                # Bernoulli trials for the remaining pop
+                successes = np.random.binomial(remaining, p_conditional)
+
+                current_K.append(successes)
+                remaining -= successes
+
+            # Whoever is left automatically goes into the final category
+            current_K.append(remaining)
+
+
         except ValueError as e:
             print(f"Warning: multinomial failed for generation {t}: {e}. Probabilities: {pvals}")
             break
