@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Callable, List
 
+# wrightfishersampling simulates natural selection based on initial allele counts and a list of functions describing
+# the fitness of each allele at each generation in time
 def wrightfishersampling(K: List[int], Ff: List[Callable[[int], int]]) -> tuple[bool, int, List[List[int]]]:
     """
     Parameters:
@@ -17,6 +19,7 @@ def wrightfishersampling(K: List[int], Ff: List[Callable[[int], int]]) -> tuple[
 
     number_of_alleles = len(K)
 
+    # population number no longer needs to be an input because it is now implied
     N = sum(K)
 
     # input validation
@@ -35,33 +38,44 @@ def wrightfishersampling(K: List[int], Ff: List[Callable[[int], int]]) -> tuple[
         raise ValueError("K must be at least 1")
 
 
+    # history will store the allele counts at each generation
     history = []
-    t = 0
-    current_K = list(K)
+    t = 0 # we assume that the first generation is 0
+    current_K = list(K) # we use current_K to not overwrite K as we work with it
 
+    # initilializing F
     F = [0.0] * number_of_alleles
 
+    # adding the first generation to history
     history.append(current_K.copy())
 
+    # while none of the alleles have yet fixed
     while max(current_K) < N:
 
+        # p is unnormalized initially because the equations in Ff model the fitness of each allele at each time
+        # in relative terms rather than proportions to make it much easier to input
         p_unnormalized = []
         for j in range(number_of_alleles):
             F[j] = Ff[j](t)
+            # the fitness of each allele is being taken based on the generation
             p_unnormalized.append(current_K[j] * F[j])
 
+        # to help normalize it:
         sum_p_unnormalized = sum(p_unnormalized)
 
         pvals = []
         if sum_p_unnormalized == 0:
             pvals = [0.0] * number_of_alleles
         else:
+            # normalization:
             pvals = [val / sum_p_unnormalized for val in p_unnormalized]
 
 
         pvals = np.array(pvals)
         pvals /= pvals.sum()
 
+        # random multinomial is implented to select the next generation using the pvals as likelihoods of
+        # each allele. Note: we need to later change random multinomial
         try:
             new_counts = np.random.multinomial(n=N, pvals=pvals)
             current_K = new_counts.tolist()
@@ -69,19 +83,23 @@ def wrightfishersampling(K: List[int], Ff: List[Callable[[int], int]]) -> tuple[
             print(f"Warning: multinomial failed for generation {t}: {e}. Probabilities: {pvals}")
             break
 
-        t += 1
-        history.append(current_K.copy())
+        history.append(current_K.copy()) # adding this generation to history
+        t += 1  # next generation begins and the loop restarts
 
-    fixed = False
+    fixed = False # default
     for a in range(number_of_alleles):
       if current_K[a] == N:
-        fixed = True
+        fixed = True # if an allele has fixed, fixed = True
         break
 
     return fixed, t, history
 
+    # technically all the alleles should fix the way that the code is currently written, but
+    # adding fixed helps detect any issues while the code is still being workshoped
+    # also, will be important if later we decide to implement polymorphic events
 
-# running the simulation
+
+# function to facilitate running the simulation multiple times
 def run_multiple_simulations(initial_K_counts: List[int], Ff_modifiers: List[Callable[[int],int]], num_simulations: int) -> List[dict]:
     all_simulation_data = []
 
@@ -115,9 +133,10 @@ def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: List[in
     num_alleles = len(initial_K_counts)
 
     fixation_event_count = 0
-    polymorphic_event_count = 0
+    polymorphic_event_count = 0 # should not occur as the code is currently written but I added in case later
+                                # we decide to allow polymorphic events
 
-    colors = plt.cm.get_cmap('viridis', num_alleles)
+    colors = plt.colormaps['viridis'].resampled(num_alleles)
 
     plotted_legend_labels = {'Fixed': False, 'Polymorphic': False}
     for i in range(num_alleles):
@@ -175,6 +194,9 @@ def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: List[in
     plt.tight_layout()
     plt.show()
 
+# this function's primary goal is to make it easier to sue the program. you call this function with the initial allele
+# counts, the fitness, and how many times you want the simulation to run, and it will do that then return a plot
+# graphing the results from all of the simulations as well as reporting the average time to fixation
 def run_everything(INITIAL_ALLELE_COUNTS: List[int], FITNESS_FUNCTIONS: List[Callable[[int],int]], NUM_RUNS: int):
 
     sim_data = run_multiple_simulations(initial_K_counts=INITIAL_ALLELE_COUNTS,
@@ -191,7 +213,8 @@ def run_everything(INITIAL_ALLELE_COUNTS: List[int], FITNESS_FUNCTIONS: List[Cal
     else:
         print("no fixation")
 
-#examples
+# examples
+# a lot of highly unrealistic cases, used to get a sense of functioning of program
 
 INITIAL_ALLELE_COUNTS = [20, 20]
 FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 1.0]
@@ -219,12 +242,12 @@ NUM_RUNS = 1000
 run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
 INITIAL_ALLELE_COUNTS = [500, 500, 500]
-FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t^2]
+FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t*t]
 NUM_RUNS = 1000
 run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
 INITIAL_ALLELE_COUNTS = [500, 500, 500, 500, 500, 500, 500]
-FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t^2, lambda t: 3.0, lambda t: 6.0, lambda t: 0.1, lambda t: 0]
+FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t*t, lambda t: 3.0, lambda t: 6.0, lambda t: 0.1, lambda t: 0]
 NUM_RUNS = 1000
 run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
@@ -254,11 +277,11 @@ NUM_RUNS = 10
 run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
 INITIAL_ALLELE_COUNTS = [500, 500, 500]
-FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t^2]
+FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t*t]
 NUM_RUNS = 10
 run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
 INITIAL_ALLELE_COUNTS = [500, 500, 500, 500, 500, 500, 500]
-FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t^2, lambda t: 3.0, lambda t: 6.0, lambda t: 0.1, lambda t: 0]
+FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t*t, lambda t: 3.0, lambda t: 6.0, lambda t: 0.1, lambda t: 0]
 NUM_RUNS = 10
 run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
