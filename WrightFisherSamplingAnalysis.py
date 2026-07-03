@@ -28,7 +28,7 @@ def wrightfishersampling(N: int, K: int) -> tuple[bool, int, list[list[float]]]:
 
 def run_multiple_simulations(N: int, K: int, num_simulations: int) -> list[dict]: 
     all_simulation_data = []
-    for _ in range(num_simulations):
+    for i in range(num_simulations):
         fixed, final_t, history = wrightfishersampling(N, K)
         all_simulation_data.append({
             "fixed": fixed, 
@@ -37,6 +37,12 @@ def run_multiple_simulations(N: int, K: int, num_simulations: int) -> list[dict]
             "frequencies": [step[1] / N for step in history],
             "variances": [step[2] for step in history]
         })
+
+        # Print progress every 10 runs
+        run_number = i + 1
+        if run_number % 10 == 0:
+            print(f"Run {run_number} of {num_simulations} is done.")
+
     return all_simulation_data
 
 def plot_wright_fisher_with_variance(simulation_results: list[dict], N: int, K: int): 
@@ -84,6 +90,7 @@ def plot_wright_fisher_with_variance(simulation_results: list[dict], N: int, K: 
     print("--- Simulation Metrics ---")
     print(f"Average generation time for Fixed alleles: {avg_fixation_time:.2f} generations")
     print(f"Average generation time for Extint alleles: {avg_extinction_time:.2f} generations")
+    print(f"Total Fixed: {fixation_count} | Total Extinct: {extinction_count}")
     print("--------------------------")
 
     # Top Plot: Allele Frequency Setup
@@ -119,8 +126,8 @@ def plot_wright_fisher_with_variance(simulation_results: list[dict], N: int, K: 
 
 #############################################
 # Running the simulation
-POPULATION_SIZE = 100
-INITIAL_ALLELES = 50
+POPULATION_SIZE = 10000
+INITIAL_ALLELES = 1
 NUM_RUNS = 10000
 
 sim_data = run_multiple_simulations(N=POPULATION_SIZE, K=INITIAL_ALLELES, num_simulations=NUM_RUNS)
