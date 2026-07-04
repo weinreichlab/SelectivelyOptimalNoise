@@ -22,9 +22,9 @@ def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]]) -> Ite
     # population number no longer needs to be an input because it is now implied
     N = np.sum(K)
 
-    # input validation, commented out for efficiency
+    # input validation
 
-    """
+
 
     if np.any(K<=0):
       raise ValueError("Number of alleles cannot be negative")
@@ -39,45 +39,39 @@ def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]]) -> Ite
     if K.size < 1:
         raise ValueError("K must be at least 1")
 
-    """
+
 
     t = 0  # we assume that the first generation is 0
-    current_K = np.array(K, dtype=float)
-    # we use current_K to not overwrite K as we work with it, now as a numpy array
 
-    # initializing F as a numpy array
-    F = np.zeros(number_of_alleles, dtype=float)
 
     # yield the initial generation
-    yield current_K.copy()
+    yield K.copy()
 
     # while none of the alleles have yet fixed
-    while np.max(current_K) < N:
+    while np.max(K) < N:
 
         # p is unnormalized initially because the equations in Ff model the fitness of each allele at each time
         # in relative terms rather than proportions to make it much easier to input
         F_values_at_t = np.array([Ff[j](t) for j in range(number_of_alleles)], dtype=float)
-        p_unnormalized = current_K * F_values_at_t
+        p_unnormalized = K * F_values_at_t
 
         sum_p_unnormalized = np.sum(p_unnormalized)
 
-        if sum_p_unnormalized == 0:
+        if sum_p_unnormalized == 0 or np.isnan(sum_p_unnormalized):
             pvals = np.zeros(number_of_alleles, dtype=float)
         else:
+            # normalize
             pvals = p_unnormalized / sum_p_unnormalized
-            # re-normalize to ensure sum is exactly 1.0, handling potential float precision issues
-            if not np.isclose(np.sum(pvals), 0.0):
-                pvals /= np.sum(pvals)
-            else:
-                pvals = np.zeros(number_of_alleles, dtype=float)
+            # force the sum of pvals to be exactly 1.0 to prevent base 2 rounding errors
+            pvals /= np.sum(pvals)
 
         # random multinomial is implemented to select the next generation using the pvals as likelihoods of
         # each allele.
 
         new_counts = np.random.multinomial(n=N, pvals=pvals)
-        current_K = new_counts
+        K = new_counts
 
-        yield current_K.copy()  # yield this generation
+        yield K.copy()  # yield this generation
         t += 1  # next generation begins and the loop restarts
 
 
