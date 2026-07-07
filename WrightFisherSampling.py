@@ -1,37 +1,34 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Callable, List, Iterator
+from typing import List, Callable, Iterator, Dict
+from concurrent.futures import ProcessPoolExecutor
+
+# global random number generator
+rng = np.random.default_rng()
 
 
 # wrightfishersampling simulates natural selection based on initial allele counts and a list of functions describing
 # the fitness of each allele at each generation in time
 def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]]) -> Iterator[np.ndarray]:
     """
-    Parameters:
+    params
     K = numpy array of initial allele count for each allele
     Ff = Fitness function. change in F. list of lambda functions that change F
            based on the generation number for each allele.
           input should be just the generation number. output is fitness.
 
-    Yields:
-    np.ndarray: The allele counts for the current generation.
+    yields np.ndarray: allele counts for current gen
     """
-
-    number_of_alleles = K.size
 
     # population number no longer needs to be an input because it is now implied
     N = np.sum(K)
 
     # input validation
 
-
-
     if np.any(K<=0):
       raise ValueError("Number of alleles cannot be negative")
-
     if N == 0:
         raise ValueError("error: population number is zero")
-
     if not isinstance(Ff, list) or not all(callable(x) for x in Ff):
         raise ValueError("Ff must be a list of callable functions")
     if not (K.size == len(Ff)):
@@ -39,26 +36,25 @@ def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]]) -> Ite
     if K.size < 1:
         raise ValueError("K must be at least 1")
 
-
-
     t = 0  # we assume that the first generation is 0
 
-
-    # yield the initial generation
-    yield K.copy()
-
     # while none of the alleles have yet fixed
-    while np.max(K) < N:
+    while True:
+
+        yield K
+
+        if np.max(K) == N:
+            break
 
         # p is unnormalized initially because the equations in Ff model the fitness of each allele at each time
         # in relative terms rather than proportions to make it much easier to input
-        F_values_at_t = np.array([Ff[j](t) for j in range(number_of_alleles)], dtype=float)
+        F_values_at_t = np.array([func(t) for func in Ff],  dtype=float)
         p_unnormalized = K * F_values_at_t
 
         sum_p_unnormalized = np.sum(p_unnormalized)
 
         if sum_p_unnormalized == 0 or np.isnan(sum_p_unnormalized):
-            pvals = np.zeros(number_of_alleles, dtype=float)
+            pvals = np.zeros_like(K, dtype=float)
         else:
             # normalize
             pvals = p_unnormalized / sum_p_unnormalized
@@ -68,12 +64,74 @@ def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]]) -> Ite
         # random multinomial is implemented to select the next generation using the pvals as likelihoods of
         # each allele.
 
-        new_counts = np.random.multinomial(n=N, pvals=pvals)
+        new_counts = rng.multinomial(n=N, pvals=pvals)
         K = new_counts
 
-        yield K.copy()  # yield this generation
         t += 1  # next generation begins and the loop restarts
 
+def run_single_simulation(initial_K_counts: np.ndarray, Ff: List[Callable[[int], float]]) -> Dict:
+   """
+   params
+     initial_K_counts : np.ndarray, array representing the initial allele counts
+     Ff : List[Callable[[int], float]], list of fitness functions for each allele
+
+   returns
+     dict containing:
+       "fixed" bool indicating if an allele fixed
+       "final_generations" total num of gens simulated
+       "allele_counts_history" np.ndarray w/ allele counts per gen
+       "allele_frequencies_history" np.ndarray w/ allele frequencies per gen
+   """
+   # get simulation history using vstack
+   history = np.vstack(list(wrightfishersampling(initial_K_counts, Ff)))
+   N = int(initial_K_counts.sum())
+
+   final_t = history.shape[0]
+   fixed = (history[-1] == N).any()
+   allele_freq = history / N
+
+   return {
+       "fixed": fixed,
+       "final_generations": final_t,
+       "allele_counts_history": history,
+       "allele_frequencies_history": allele_freq,
+   }
+
+def run_multiple_simulations_parallel(initial_K_counts: np.ndarray,
+                                     Ff: List[Callable[[int], float]],
+                                     num_simulations: int) -> List[Dict]:
+   """
+   runs multiple independent Wright–Fisher simulations in parallel at optimum efficiency
+
+   params
+     initial_K_counts : np.ndarray, initial allele counts
+     Ff : List[Callable[[int], float]], list of fitness functions of each allele
+     num_simulations : int
+
+   output:
+     List[Dict]: list of dictionaries returned by run_single_simulation
+   """
+   with ProcessPoolExecutor() as executor:
+       futures = [
+           executor.submit(run_single_simulation, initial_K_counts, Ff)
+           for _ in range(num_simulations)
+       ]
+       results = [future.result() for future in futures]
+   return results
+
+
+# define a named fitness function (can't use lambdas)
+def constant_fitness_1(t: int) -> float:
+   return 1.0
+
+def constant_fitness_3(t: int) -> float:
+   return 3.0
+
+def linear_fitness_0p1(t: int) -> float:
+   return 1.0+0.1*t
+
+def square_fitness(t: int) -> float:
+   return t*t
 
 # function to facilitate running the simulation multiple times
 def run_multiple_simulations(initial_K_counts: np.ndarray, Ff_modifiers: List[Callable[[int], int]],
@@ -124,7 +182,7 @@ def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: np.ndar
         plotted_legend_labels[f'Initial Freq Allele {i + 1}'] = False
 
     for sim_idx, run in enumerate(simulation_results):
-        generations = run["generations"]
+        generations = range(run["allele_frequencies_history"].shape[0])
         allele_frequencies_history = run["allele_frequencies_history"]
 
         # list of arrays -> 2D numpy array, then transpose and convert to list of lists for plotting
@@ -174,9 +232,9 @@ def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: np.ndar
 # this function's primary goal is to make it easier to use the program. you call this function with the initial allele
 # counts, the fitness, and how many times you want the simulation to run, and it will do that then return a plot
 # graphing the results from all of the simulations as well as reporting the average time to fixation
-def run_everything(INITIAL_ALLELE_COUNTS: np.ndarray, FITNESS_FUNCTIONS: List[Callable[[int], int]], NUM_RUNS: int):
-    sim_data = run_multiple_simulations(initial_K_counts=INITIAL_ALLELE_COUNTS,
-                                        Ff_modifiers=FITNESS_FUNCTIONS,
+def run_everything(INITIAL_ALLELE_COUNTS: np.ndarray, FITNESS_FUNCTIONS: List[Callable[[int], float]], NUM_RUNS: int):
+    sim_data = run_multiple_simulations_parallel(initial_K_counts=INITIAL_ALLELE_COUNTS,
+                                        Ff=FITNESS_FUNCTIONS,
                                         num_simulations=NUM_RUNS)
     plot_wright_fisher(sim_data, initial_K_counts=INITIAL_ALLELE_COUNTS)
 
@@ -189,77 +247,52 @@ def run_everything(INITIAL_ALLELE_COUNTS: np.ndarray, FITNESS_FUNCTIONS: List[Ca
         print("no fixation")
 
 
-# examples
-# a lot of highly unrealistic cases, used to get a sense of functioning of program
+if __name__ == '__main__':
+    # examples
+    # a lot of highly unrealistic cases, used to get a sense of functioning of program
 
-INITIAL_ALLELE_COUNTS = np.array([20, 20])
-FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 1.0]
-NUM_RUNS = 1000
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([20, 20])
+    FITNESS_FUNCTIONS = [constant_fitness_1, constant_fitness_1]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
-INITIAL_ALLELE_COUNTS = np.array([40, 90, 70])
-FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 1.0, lambda t: 1.0]
-NUM_RUNS = 1000
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([40, 90, 70])
+    FITNESS_FUNCTIONS = [constant_fitness_1, constant_fitness_1, constant_fitness_1]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
-INITIAL_ALLELE_COUNTS = np.array([40, 90, 70])
-FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 0.1, lambda t: 1.0 + 0.01 * t]
-NUM_RUNS = 1000
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([40, 90, 70])
+    FITNESS_FUNCTIONS = [constant_fitness_1, constant_fitness_3, linear_fitness_0p1]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
-INITIAL_ALLELE_COUNTS = np.array([40, 90, 40])
-FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 0.1, lambda t: 1.0 + 0.01 * t]
-NUM_RUNS = 1000
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([40, 90, 40])
+    FITNESS_FUNCTIONS = [constant_fitness_1, constant_fitness_3, linear_fitness_0p1]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
-INITIAL_ALLELE_COUNTS = np.array([1, 1, 1])
-FITNESS_FUNCTIONS = [lambda t: 0.2, lambda t: 0.2, lambda t: 0.2]
-NUM_RUNS = 1000
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([1, 1, 1])
+    FITNESS_FUNCTIONS = [constant_fitness_3, constant_fitness_3, constant_fitness_3]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
-INITIAL_ALLELE_COUNTS = np.array([500, 500, 500])
-FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t * t]
-NUM_RUNS = 1000
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([500, 500, 500])
+    FITNESS_FUNCTIONS = [linear_fitness_0p1, constant_fitness_1, square_fitness]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
-INITIAL_ALLELE_COUNTS = np.array([500, 500, 500, 500, 500, 500, 500])
-FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t * t, lambda t: 3.0, lambda t: 6.0, lambda t: 0.1,
-                     lambda t: 0]
-NUM_RUNS = 1000
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([500, 500, 500, 500, 500, 500, 500])
+    FITNESS_FUNCTIONS = [constant_fitness_1, constant_fitness_1, square_fitness, constant_fitness_3, constant_fitness_3, linear_fitness_0p1,
+                         linear_fitness_0p1]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
-INITIAL_ALLELE_COUNTS = np.array([20, 20])
-FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 1.0]
-NUM_RUNS = 10
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([20, 20])
+    FITNESS_FUNCTIONS = [constant_fitness_1, constant_fitness_1]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
 
-INITIAL_ALLELE_COUNTS = np.array([40, 90, 70])
-FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 1.0, lambda t: 1.0]
-NUM_RUNS = 10
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
-
-INITIAL_ALLELE_COUNTS = np.array([40, 90, 70])
-FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 0.1, lambda t: 1.0 + 0.01 * t]
-NUM_RUNS = 10
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
-
-INITIAL_ALLELE_COUNTS = np.array([40, 90, 40])
-FITNESS_FUNCTIONS = [lambda t: 1.0, lambda t: 0.1, lambda t: 1.0 + 0.01 * t]
-NUM_RUNS = 10
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
-
-INITIAL_ALLELE_COUNTS = np.array([1, 1, 1])
-FITNESS_FUNCTIONS = [lambda t: 0.2, lambda t: 0.2, lambda t: 0.2]
-NUM_RUNS = 10
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
-
-INITIAL_ALLELE_COUNTS = np.array([500, 500, 500])
-FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t * t]
-NUM_RUNS = 10
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
-
-INITIAL_ALLELE_COUNTS = np.array([500, 500, 500, 500, 500, 500, 500])
-FITNESS_FUNCTIONS = [lambda t: t, lambda t: 1.0, lambda t: t * t, lambda t: 3.0, lambda t: 6.0, lambda t: 0.1,
-                     lambda t: 0]
-NUM_RUNS = 10
-run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    INITIAL_ALLELE_COUNTS = np.array([40, 90, 70])
+    FITNESS_FUNCTIONS = [constant_fitness_1, constant_fitness_1, constant_fitness_1]
+    NUM_RUNS = 1000
+    run_everything(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
