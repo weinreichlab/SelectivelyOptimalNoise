@@ -133,38 +133,6 @@ def linear_fitness_0p1(t: int) -> float:
 def square_fitness(t: int) -> float:
    return t*t
 
-# function to facilitate running the simulation multiple times
-def run_multiple_simulations(initial_K_counts: np.ndarray, Ff_modifiers: List[Callable[[int], int]],
-                             num_simulations: int) -> List[dict]:
-    all_simulation_data = []
-
-    for _ in range(num_simulations):
-        # wrightfishersampling now returns a generator, so we convert it to a list to process
-        allele_counts_history_list = list(wrightfishersampling(initial_K_counts, Ff_modifiers))
-
-        N = np.sum(initial_K_counts)
-
-        generations = list(range(len(allele_counts_history_list)))
-        allele_counts_history = allele_counts_history_list
-
-        # fixation status and final generation determined from the collected history
-        final_t = len(allele_counts_history_list) - 1
-        last_generation_counts = allele_counts_history_list[-1]
-        fixed = any(count == N for count in last_generation_counts)  # check if any allele count equals total population
-
-        # convert counts to frequencies using numpy array operations
-        allele_frequencies_history = [k_array / N for k_array in allele_counts_history]
-
-        all_simulation_data.append({
-            "fixed": fixed,
-            "final_generations": final_t,
-            "generations": generations,
-            "allele_counts_history": allele_counts_history,
-            "allele_frequencies_history": allele_frequencies_history
-        })
-
-    return all_simulation_data
-
 
 # plotting the results/analysis
 def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: np.ndarray):
