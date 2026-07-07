@@ -1,5 +1,6 @@
 import numpy as np 
 import matplotlib.pyplot as plt
+import csv
 
 def wrightfishersampling(N: int, K: int) -> tuple[bool, int, list[list[float]]]:
     if N <= 0: 
@@ -124,6 +125,35 @@ def plot_wright_fisher_with_variance(simulation_results: list[dict], N: int, K: 
     plt.tight_layout()
     plt.show()
 
+def export_to_csv(simulation_results: list[dict], filename: str = "wright_fisher_results.csv"):
+    print(f"Exporting data to {filename}...")
+    
+    headers = [
+        "Simulation_ID", # Helps diferentiate between runs
+        "Is_Fixed", # True or False designation for if the simulation fixed
+        "Total_Generations",# Generation at which the run ended
+        "Generation", # Current generation, paired with allele freq.
+        "Allele_Frequency", 
+        "Variance"
+    ]
+    
+    with open(filename, mode="w", newline="", encoding="utf-8-sig") as il:
+        writer = csv.writer(il)
+        writer.writerow(headers)
+        
+        for sim_id, run in enumerate(simulation_results, start=1):
+            is_fixed = run["fixed"]
+            total_gens = run["final_generations"]
+            
+            rows = (
+                [sim_id, is_fixed, total_gens, gen, freq, var]
+                for gen, freq, var in zip(run["generations"], run["frequencies"], run["variances"])
+            )
+            
+            writer.writerows(rows)
+                
+    print("Export complete")
+ 
 #############################################
 # Running the simulation
 POPULATION_SIZE = 10000
@@ -132,3 +162,6 @@ NUM_RUNS = 10000
 
 sim_data = run_multiple_simulations(N=POPULATION_SIZE, K=INITIAL_ALLELES, num_simulations=NUM_RUNS)
 plot_wright_fisher_with_variance(sim_data, N=POPULATION_SIZE, K=INITIAL_ALLELES)
+
+# Export to CSV for Excel
+export_to_csv(sim_data, filename="wright_fisher_simulation.csv")
