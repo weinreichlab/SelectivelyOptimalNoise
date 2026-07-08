@@ -78,6 +78,7 @@ def run_single_simulation(initial_K_counts: np.ndarray, Ff: List[Callable[[int],
    returns
      dict containing:
        "fixed" bool indicating if an allele fixed
+       "fixed_allele_idx" int indicating which specific allele index fixed
        "final_generations" total num of gens simulated
        "allele_counts_history" np.ndarray w/ allele counts per gen
        "allele_frequencies_history" np.ndarray w/ allele frequencies per gen
@@ -88,10 +89,17 @@ def run_single_simulation(initial_K_counts: np.ndarray, Ff: List[Callable[[int],
 
    final_t = history.shape[0]
    fixed = (history[-1] == N).any()
+   
+   # Track exactly which allele index achieved fixation
+   fixed_allele_idx = None
+   if fixed:
+       fixed_allele_idx = int(np.argmax(history[-1]))
+
    allele_freq = history / N
 
    return {
        "fixed": fixed,
+       "fixed_allele_idx": fixed_allele_idx,
        "final_generations": final_t,
        "allele_counts_history": history,
        "allele_frequencies_history": allele_freq,
@@ -141,7 +149,14 @@ def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: np.ndar
     N = np.sum(initial_K_counts)
     num_alleles = len(initial_K_counts)
 
-    fixation_event_count = 0
+    # Initialize tracking structures for specific wins
+    allele_fixation_counts = np.zeros(num_alleles, dtype=int)
+    total_fixations = 0
+
+    for run in simulation_results:
+        if run["fixed"] and run["fixed_allele_idx"] is not None:
+            allele_fixation_counts[run["fixed_allele_idx"]] += 1
+            total_fixations += 1
 
     colors = plt.colormaps['viridis'].resampled(num_alleles)
 
@@ -153,16 +168,11 @@ def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: np.ndar
         generations = range(run["allele_frequencies_history"].shape[0])
         allele_frequencies_history = run["allele_frequencies_history"]
 
-        # list of arrays -> 2D numpy array, then transpose and convert to list of lists for plotting
+        # 2D array transpose converted to list of lists for plotting
         frequencies_by_allele = np.array(allele_frequencies_history).T.tolist()
-
-        is_fixed = run["fixed"]
 
         linestyle = '-'
         outcome_label_key = 'Fixed'
-
-        if outcome_label_key == 'Fixed':
-            fixation_event_count += 1
 
         for allele_idx in range(num_alleles):
             label_for_legend = None
@@ -171,7 +181,7 @@ def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: np.ndar
                 plotted_legend_labels[outcome_label_key] = True
 
             plt.plot(generations, frequencies_by_allele[allele_idx],
-                     color=colors(allele_idx), alpha=0.5, linewidth=1.0, linestyle=linestyle,
+                     color=colors(allele_idx), alpha=0.3, linewidth=1.0, linestyle=linestyle,
                      label=label_for_legend)
 
     plt.axhline(y=1.0, color='black', linestyle='-', alpha=0.6, label='Fixation (p=1.0)')
@@ -180,13 +190,19 @@ def plot_wright_fisher(simulation_results: List[dict], initial_K_counts: np.ndar
     for allele_idx, freq in enumerate(initial_frequencies):
         legend_key = f'Initial Freq Allele {allele_idx + 1}'
         if not plotted_legend_labels[legend_key]:
+            fix_count = allele_fixation_counts[allele_idx]
+            fix_pct = (fix_count / len(simulation_results)) * 100
+            
+            label_text = (f'Allele {allele_idx + 1}: Init p={freq:.2f} | '
+                          f'Fixed {fix_count} times ({fix_pct:.1f}%)')
+            
             plt.axhline(y=freq, color=colors(allele_idx), linestyle='-.', alpha=0.7,
-                        label=f'Initial Freq Allele {allele_idx + 1} (p={freq:.2f})')
+                        label=label_text)
             plotted_legend_labels[legend_key] = True
 
     plt.title(
-        f"Wright-Fisher Model (N={N}, Initial Allele Counts={initial_K_counts.tolist()})\n" +  # cnvert to list for display
-        f"Fixed (any allele): {fixation_event_count}",
+        f"Wright-Fisher Model (N={N}, Initial Allele Counts={initial_K_counts.tolist()})\n" +
+        f"Total Runs: {len(simulation_results)} | Total Fixations: {total_fixations}",
         fontsize=12)
     plt.xlabel("Generation (Time)", fontsize=11)
     plt.ylabel("Allele Frequency (p)", fontsize=11)
