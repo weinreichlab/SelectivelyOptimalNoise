@@ -94,35 +94,80 @@ def plot_allele_frequency_paths(simulation_results: list[dict], N: int, K: int):
     plt.tight_layout()
 
 def plot_observed_vs_expected_variance(simulation_results: list[dict], N: int):
+    # Separate runs by outcome
+    fixed_runs = [run for run in simulation_results if run["fixed"]]
+    extinct_runs = [run for run in simulation_results if not run["fixed"]]
+    
+    # We will also keep track of raw sample counts per frequency to build our table
+    fixed_counts_dict = defaultdict(int)
+    extinct_counts_dict = defaultdict(int)
+    
+    def calculate_variance_and_collect_counts(runs: list[dict], counts_tracker: dict) -> tuple[np.ndarray, np.ndarray]:
+        transitions = defaultdict(list)
+        for run in runs:
+            counts = run["counts"]
+            for t in range(len(counts) - 1):
+                k_current = counts[t]
+                k_next = counts[t + 1]
+                transitions[k_current].append(k_next / N)
+                counts_tracker[k_current] += 1 # Track how many transitions start here
+                
+            # Account for absorbing endpoints
+            final_count = counts[-1]
+            if final_count == 0:
+                transitions[0].append(0.0)
+                counts_tracker[0] += 1
+            elif final_count == N:
+                transitions[N].append(1.0)
+                counts_tracker[N] += 1
+                
+        observed_counts = []
+        observed_variances = []
+        
+        for k, next_freqs in transitions.items():
+            if k in (0, N):
+                observed_counts.append(k)
+                observed_variances.append(0.0)
+            elif len(next_freqs) >= 2:
+                observed_counts.append(k)
+                observed_variances.append(np.var(next_freqs))
+                
+        if not observed_counts:
+            return np.array([]), np.array([])
+            
+        observed_counts = np.array(observed_counts)
+        observed_variances = np.array(observed_variances)
+        sort_idx = np.argsort(observed_counts)
+        
+        return observed_counts[sort_idx] / N, observed_variances[sort_idx]
 
-    transitions = defaultdict(list)
+    # Calculate variances and collect transition sample sizes
+    freq_fixed, var_fixed = calculate_variance_and_collect_counts(fixed_runs, fixed_counts_dict)
+    freq_extinct, var_extinct = calculate_variance_and_collect_counts(extinct_runs, extinct_counts_dict)
+
+    # --- Print Sample Size Table to Console ---
+    print("\n========================================================")
+    print("      TRANSITION DATA POINTS BY FREQUENCY INTERVAL      ")
+    print("========================================================")
+    print(f"| Frequency Range | Fixed Runs (n={len(fixed_runs)}) | Extinct Runs (n={len(extinct_runs)}) |")
+    print("|-----------------|------------------|--------------------|")
     
-    for run in simulation_results:
-        counts = run["counts"]
-        for t in range(len(counts) - 1):
-            k_current = counts[t]
-            k_next = counts[t + 1]
-            freq_next = k_next / N
-            transitions[k_current].append(freq_next)
+    # Define 10 bins across the frequency spectrum [0.0 to 1.0]
+    bins = [(i/10, (i+1)/10) for i in range(10)]
+    for start, end in bins:
+        # Sum up transition points whose starting frequency falls in this bin
+        fixed_sum = sum(count for k, count in fixed_counts_dict.items() if start <= (k/N) < end)
+        extinct_sum = sum(count for k, count in extinct_counts_dict.items() if start <= (k/N) < end)
+        
+        # Format edge cases for the final boundary (1.0)
+        if end == 1.0:
+            fixed_sum += fixed_counts_dict[N]
+            extinct_sum += extinct_counts_dict[N]
+            print(f"| [{start:.1f}, {end:.1f}]       | {fixed_sum:<16} | {extinct_sum:<18} |")
+        else:
+            print(f"| [{start:.1f}, {end:.1f})       | {fixed_sum:<16} | {extinct_sum:<18} |")
             
-    observed_counts = []
-    observed_variances = []
-    
-    # Require at least 2 samples to compute a mathematical variance
-    MIN_SAMPLES = 2 
-    
-    for k, next_freqs in transitions.items():
-        if len(next_freqs) >= MIN_SAMPLES:
-            observed_counts.append(k)
-            observed_variances.append(np.var(next_freqs))
-            
-    observed_counts = np.array(observed_counts)
-    observed_variances = np.array(observed_variances)
-    sort_idx = np.argsort(observed_counts)
-    
-    observed_counts = observed_counts[sort_idx]
-    observed_variances = observed_variances[sort_idx]
-    observed_frequencies = observed_counts / N
+    print("========================================================\n")
 
     # Theoretical curve calculation
     expected_frequencies = np.linspace(0, 1, 500) 
@@ -130,17 +175,28 @@ def plot_observed_vs_expected_variance(simulation_results: list[dict], N: int):
 
     plt.figure(figsize=(10, 6))
     
+
+    # Plot empirical data for Extinct runs (Crashed)
+    if len(freq_extinct) > 0:
+        plt.plot(freq_extinct, var_extinct, color='crimson', linestyle='-', 
+                 linewidth=1.5, marker='o', markersize=3, alpha=0.8, 
+                 label=f"Observed (Extinct Runs, n={len(extinct_runs)})")
+        
+    # Plot empirical data for Fixed runs
+    if len(freq_fixed) > 0:
+        plt.plot(freq_fixed, var_fixed, color='forestgreen', linestyle='-', 
+                 linewidth=1.5, marker='s', markersize=3, alpha=0.8, 
+                 label=f"Observed (Fixed Runs, n={len(fixed_runs)})")
+        
     # Plot expected curve
     plt.plot(expected_frequencies, expected_variances, color='black', linestyle='--', 
              linewidth=2, label=r"Expected Variance: $\frac{x(1-x)}{N}$")
     
-    # Plot empirical data
-    plt.plot(observed_frequencies, observed_variances, color='crimson', linestyle='-', 
-             linewidth=1.5, marker='o', markersize=3, alpha=0.8, label="Observed Variance")
 
     plt.title(f"Wright-Fisher Model: Observed vs. Expected Variance (N={N})", fontsize=12)
     plt.xlabel("Allele Frequency (x = k/N)", fontsize=11)
     plt.ylabel("Variance of Frequency in Next Generation", fontsize=11)
+    plt.xlim(-0.05, 1.05)
     plt.grid(True, linestyle='--', alpha=0.3)
     plt.legend(loc='best')
     plt.tight_layout()
@@ -165,7 +221,8 @@ def export_to_csv(simulation_results: list[dict], filename: str = "wright_fisher
 #############################################
 # Running the simulation
 POPULATION_SIZE = 1000  
-INITIAL_ALLELES = 500 
+INITIAL_ALLELES = 500
+
 
 NUM_RUNS = 1000
 sim_data = run_multiple_simulations(N=POPULATION_SIZE, K=INITIAL_ALLELES, num_simulations=NUM_RUNS)
