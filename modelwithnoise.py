@@ -21,7 +21,7 @@ KEY MAJOR DIFFERENCES FROM PREVIOUS MODEL INCORPORATING NOISE:
 -genotypes are floats instead of ints
 -phenotypes are no longer represented, and genotype directly determines fitness
 -fitness is no longer a user input, instead it is computed using the formula from Prof Weinreich's most recent paper,
-        so also now wopt and zopt are user inputs (zopt can be set to zero easily but doesn't have to be). if wopt is set
+        so also now wopt and zopt are user inputs (zopt is automatically set to 0.0 but you can change it). if wopt is set
         to an invalid value, i.e. such that wz is negative, an automatic failwith is raised
 -there is an option to input constant mu, aka constant noise, and in this case, the amount of noise in the population is
         the same for all individuals at every point in time, and it's whatever you set constant mu to. note that you can
