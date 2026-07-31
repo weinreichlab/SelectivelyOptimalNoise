@@ -1,0 +1,462 @@
+import numpy as np
+from typing import List, Callable, Iterator, Dict
+from scipy.special import lambertw
+import warnings
+
+#note: require wf_core.py to run! this is just the graphing part of the program
+warnings.filterwarnings("ignore")
+
+
+class ConstantFitness:
+    """A picklable, arbitrary-valued stand-in for the named constant_fitness_N
+    functions in the original code. Needed because sweeps require many
+    distinct fitness values that can't each get a hand-written module-level
+    function."""
+    def __init__(self, value):
+        self.value = float(value)
+
+    def __call__(self, t):
+        return self.value
+
+    def __repr__(self):
+        return f"ConstantFitness({self.value})"
+
+
+# ---------------------------------------------------------------------------
+# Core simulation (unchanged in logic from the user's original code)
+# ---------------------------------------------------------------------------
+
+def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]], rng=None, seed=None) -> Iterator[np.ndarray]:
+    if rng is None:
+        rng = np.random.default_rng(seed)
+
+    N = np.sum(K)
+
+    if np.any(K <= 0):
+        raise ValueError("Number of alleles cannot be negative")
+    if N == 0:
+        raise ValueError("error: population number is zero")
+    if not isinstance(Ff, list) or not all(callable(x) for x in Ff):
+        raise ValueError("Ff must be a list of callable functions")
+    if not (K.size == len(Ff)):
+        raise ValueError("K and Ff must have the same length")
+    if K.size < 1:
+        raise ValueError("K must be at least 1")
+
+    t = 0
+    while True:
+        yield K
+        if np.max(K) == N:
+            break
+
+        F_values_at_t = np.array([func(t) for func in Ff], dtype=float)
+        p_unnormalized = K * F_values_at_t
+        sum_p_unnormalized = np.sum(p_unnormalized)
+
+        if sum_p_unnormalized == 0 or np.isnan(sum_p_unnormalized):
+            pvals = np.zeros_like(K, dtype=float)
+        else:
+            pvals = p_unnormalized / sum_p_unnormalized
+            pvals /= np.sum(pvals)
+
+        K = rng.multinomial(n=N, pvals=pvals)
+        t += 1
+
+
+def run_single_simulation(initial_K_counts: np.ndarray, Ff: List[Callable[[int], float]], seed=None) -> Dict:
+    local_rng = np.random.default_rng(seed)
+    history = np.vstack(list(wrightfishersampling(initial_K_counts, Ff, local_rng)))
+    N = int(initial_K_counts.sum())
+
+    final_t = history.shape[0] - 1
+    fixed = (history[-1] == N).any()
+    first_allele_fixed = (history[-1][0] == N) if fixed else False
+
+    allele_freq = history / N
+
+    return {
+        "fixed": fixed,
+        "final_generations": final_t,
+        "allele_counts_history": history,
+        "allele_frequencies_history": allele_freq,
+        "first_allele_fixed": first_allele_fixed,
+    }
+
+
+def run_multiple_simulations_parallel(initial_K_counts: np.ndarray,
+                                       Ff: List[Callable[[int], float]],
+                                       num_simulations: int) -> List[Dict]:
+    """Serial on purpose: this sandbox has a single CPU core, so spinning up
+    a ProcessPoolExecutor would add pure overhead with zero parallel benefit.
+    The simulation logic itself (run_single_simulation) is unchanged."""
+    seed_seq = np.random.SeedSequence()
+    child_seeds = seed_seq.spawn(num_simulations)
+    results = [run_single_simulation(initial_K_counts, Ff, child_seeds[i]) for i in range(num_simulations)]
+    return results
+
+
+# named constants kept for compatibility / debugging
+def constant_fitness_1(t):
+    return 1.0
+
+
+# ---------------------------------------------------------------------------
+# 13 analysis functions (unchanged math from the user's original code)
+# ---------------------------------------------------------------------------
+
+def Psi_s(s: float) -> float:
+    res = 1 + lambertw(-(1 + s) * np.exp(-(1 + s))).real / (s + 1)
+    if isinstance(res, np.ndarray):
+        res[np.isnan(res)] = 0.
+    else:
+        if np.isnan(res):
+            res = 0.
+    return res
+
+
+def stable_ratio(r, s1, s2):
+    if not (float(s1).is_integer() and float(s2).is_integer()):
+        raise ValueError("s1 and s2 must be integers when r can be negative")
+    s1, s2 = int(s1), int(s2)
+
+    if r == 0:
+        return 0.
+    if r == 1:
+        return s1 / (s1 + s2)
+
+    sign_r = -1.0 if r < 0 else 1.0
+    ln_abs_r = np.log(np.abs(r))
+
+    sr1 = sign_r ** (s1 % 2)
+    sr2 = sign_r ** (s2 % 2)
+
+    a = s1 * ln_abs_r
+    b = -s2 * ln_abs_r
+    m = max(a, b, 0.0)
+
+    num = sr1 * np.exp(a - m) - np.exp(-m)
+    den = sr1 * np.exp(a - m) - sr2 * np.exp(b - m)
+
+    if den == 0.0:
+        raise ZeroDivisionError("r**s1 == r**-s2; expression is undefined for these s1, s2")
+
+    return num / den
+
+
+def PFn___(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    fitness1 = FITNESS_FUNCTIONS[0](1)
+    fitness2 = FITNESS_FUNCTIONS[1](1)
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+
+    expected = size1 / N
+    results['expected_PFn___'] = expected
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
+    p = len(first_allele_fixations) / NUM_RUNS
+    results['p'] = p
+    results['difference'] = expected - p
+    return results
+
+
+def PFbg_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    fitness1 = FITNESS_FUNCTIONS[0](1)
+    fitness2 = FITNESS_FUNCTIONS[1](1)
+    s = (fitness1 - fitness2) / fitness2
+
+    expected = Psi_s(s)
+    results['expected_PFbg_1'] = expected
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
+    p = len(first_allele_fixations) / NUM_RUNS
+    results['p_PFbg_1'] = p
+    results['difference'] = expected - p
+    return results
+
+
+def PFbgw1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    fitness1 = FITNESS_FUNCTIONS[0](1)
+    fitness2 = FITNESS_FUNCTIONS[1](1)
+    s = (fitness1 - fitness2) / fitness2
+
+    expected = 2 * s
+    results['expected_PFbgw1'] = expected
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
+    p = len(first_allele_fixations) / NUM_RUNS
+    results['p'] = p
+    results['difference'] = expected - p
+    return results
+
+
+def PFb_w_(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    fitness1 = FITNESS_FUNCTIONS[0](1)
+    fitness2 = FITNESS_FUNCTIONS[1](1)
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+    s = (fitness1 - fitness2) / fitness2
+
+    denominator = -np.expm1(-2 * N * s)
+    if denominator != 0:
+        expected = -np.expm1(-2 * s * size1) / denominator
+    else:
+        expected = np.nan
+    results['expected_PFb_w_'] = expected
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
+    p = len(first_allele_fixations) / NUM_RUNS
+    results['p'] = p
+    results['difference'] = expected - p
+    return results
+
+
+def PF____(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    fitness1 = FITNESS_FUNCTIONS[0](1)
+    fitness2 = FITNESS_FUNCTIONS[1](1)
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+
+    r = fitness1 / fitness2
+    expected = stable_ratio(r, size1, size2)
+    results['expected_PF____'] = expected
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
+    p = len(first_allele_fixations) / NUM_RUNS
+    results['p'] = p
+    results['difference'] = expected - p
+    return results
+
+
+def TFb_w1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    fitness1 = FITNESS_FUNCTIONS[0](1)
+    fitness2 = FITNESS_FUNCTIONS[1](1)
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+    s = (fitness1 - fitness2) / fitness2
+
+    expected = np.nan
+    p = size1 / N
+    q = size2 / N
+    mean_fitness = p * fitness1 + q * fitness2
+    if mean_fitness != 0:
+        Vw = p * q * (fitness1 - fitness2) ** 2 / mean_fitness ** 2
+    else:
+        Vw = np.nan
+    if Vw != -1:
+        Ne = N / (1 + Vw)
+    else:
+        Ne = np.nan
+
+    c = 1
+    if np.isfinite(Ne) and s != 0 and (c * Ne - 1) > 0 and s < 1 / Ne:
+        expected = 2 * np.log(c * Ne - 1) / s
+    results['expected_avg_fixation_time'] = expected
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    fixed_generations = [run['final_generations'] for run in sim_data if run['first_allele_fixed']]
+    simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
+    results['simulated_avg_fixation_time'] = simulated_average_fixation_time
+    results['difference'] = expected - simulated_average_fixation_time
+    return results
+
+
+def TFb_s1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    fitness1 = FITNESS_FUNCTIONS[0](1)
+    fitness2 = FITNESS_FUNCTIONS[1](1)
+    s = (fitness1 - fitness2) / fitness2
+
+    expected = np.nan
+    c = 1
+    if s != 0 and (c * INITIAL_ALLELE_COUNTS.sum() - 1) > 0:
+        expected = 2 * np.log(c * INITIAL_ALLELE_COUNTS.sum() - 1) / s
+    results['expected_TFb_s1'] = expected
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    fixed_generations = [run['final_generations'] for run in sim_data if run['first_allele_fixed']]
+    simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
+    results['simulated_avg_fixation_time'] = simulated_average_fixation_time
+    results['difference'] = expected - simulated_average_fixation_time
+    return results
+
+
+def TFn__1a(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+
+    Ne = N
+    p = size1 / N
+    if p != 0:
+        expected = -1 / p * (2 * Ne * (1 - p) * np.log1p(-p))
+    else:
+        expected = 2 * Ne
+    results['expected_TFn__1a'] = expected
+
+    fixed_generations = [run['final_generations'] for run in sim_data if run['first_allele_fixed']]
+    simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
+    results['simulated_avg_fixation_time'] = simulated_average_fixation_time
+    results['difference'] = expected - simulated_average_fixation_time
+    return results
+
+
+def TFn__1b(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+
+    Ne = N
+    expected = -2 * N * Ne * (1 - 1 / N) * np.log1p(-1 / N)
+    results['expected_TFn__1b'] = expected
+
+    fixed_generations = [run['final_generations'] for run in sim_data if run['first_allele_fixed']]
+    simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
+    results['simulated_avg_fixation_time'] = simulated_average_fixation_time
+    results['difference'] = expected - simulated_average_fixation_time
+    return results
+
+
+def TFng_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+
+    Ne = N
+    expected = 2 * Ne
+    results['expected_TFng_1'] = expected
+    fixed_generations = [run['final_generations'] for run in sim_data if run['first_allele_fixed']]
+    simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
+    results['simulated_avg_fixation_time'] = simulated_average_fixation_time
+    results['difference'] = expected - simulated_average_fixation_time
+    return results
+
+
+def TLn__1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+
+    Ne = N
+    p = size2 / N
+    if p != 1:
+        expected = -2 * Ne * (p / (1 - p)) * np.log(p)
+    else:
+        expected = 2 * Ne
+    results['expected_TLn__1'] = expected
+
+    fixed_generations = [run['final_generations'] for run in sim_data if run['fixed'] and not run['first_allele_fixed']]
+    simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
+    results['simulated_avg_fixation_time'] = simulated_average_fixation_time
+    results['difference'] = expected - simulated_average_fixation_time
+    return results
+
+
+def TC(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    fitness1 = FITNESS_FUNCTIONS[0](1)
+    fitness2 = FITNESS_FUNCTIONS[1](1)
+    size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
+    N = size1 + size2
+    s = (fitness1 - fitness2) / fitness2
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+
+    Ne = N
+    c = 1
+    if s != 0 and np.isfinite(Ne) and (c * Ne - 1) > 0:
+        expected = 2 * np.log(c * Ne - 1) / s
+    else:
+        expected = np.nan
+    results['expected_TC'] = expected
+
+    passage_times = []
+    if np.isfinite(Ne) and Ne > 0:
+        target_freq_start = 1 / (c * Ne)
+        target_freq_end = 1 - 1 / (c * Ne)
+        if 0 < target_freq_start < 1 and 0 < target_freq_end < 1 and target_freq_start < target_freq_end:
+            for run in sim_data:
+                freq_allele_1 = run['allele_frequencies_history'][:, 0]
+                start_gen_indices = np.where(freq_allele_1 >= target_freq_start)[0]
+                start_gen_idx = start_gen_indices[0] if start_gen_indices.size > 0 else -1
+                end_gen_indices = np.where(freq_allele_1 >= target_freq_end)[0]
+                end_gen_idx = end_gen_indices[0] if end_gen_indices.size > 0 else -1
+                if start_gen_idx != -1 and end_gen_idx != -1 and end_gen_idx > start_gen_idx:
+                    passage_times.append(end_gen_idx - start_gen_idx)
+
+    simulated_average_passage_time = np.mean(passage_times) if passage_times else np.nan
+    results['simulated_avg_passage_time'] = simulated_average_passage_time
+
+    fixed_generations = [run['final_generations'] for run in sim_data if run['fixed']]
+    simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
+    results['simulated_avg_fixation_time'] = simulated_average_fixation_time
+    results['difference'] = expected - simulated_average_fixation_time
+    return results
+
+
+def FFT(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+    results = {}
+    r1 = FITNESS_FUNCTIONS[0](1)
+    r2 = FITNESS_FUNCTIONS[1](1)
+
+    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+
+    all_differences = []
+    for run in sim_data:
+        frequencies = run['allele_frequencies_history']
+        f1 = frequencies[:, 0]
+        mean_fitness = (f1 * r1) + ((1 - f1) * r2)
+        fitness_variance = (f1 * (r1 ** 2)) + ((1 - f1) * (r2 ** 2)) - (mean_fitness ** 2)
+        delta_mean_fitness = np.diff(mean_fitness)
+        variance_at_t = fitness_variance[:-1]
+        difference = delta_mean_fitness - variance_at_t
+        all_differences.extend(difference)
+
+    difference_in_FFT = float(np.mean(all_differences)) if all_differences else np.nan
+    results['difference'] = difference_in_FFT
+    return results
+
+
+ANALYSIS_FUNCTIONS = {
+    'PFn___': PFn___, 'PFbg_1': PFbg_1, 'PFbgw1': PFbgw1, 'PFb_w_': PFb_w_, 'PF____': PF____,
+    'TFb_w1': TFb_w1, 'TFb_s1': TFb_s1, 'TFn__1a': TFn__1a, 'TFn__1b': TFn__1b,
+    'TFng_1': TFng_1, 'TLn__1': TLn__1, 'TC': TC, 'FFT': FFT,
+}
+
+# Note: fixed a bug from the original ANALYSIS_COLUMN_MAP -- PFbg_1 actually
+# stores its simulated probability under 'p_PFbg_1', not 'p'. Using 'p' (as
+# the original map did) silently produced NaN/missing observed values for
+# every PFbg_1 row in the original table/plot code.
+ANALYSIS_COLUMN_MAP = {
+    'PFn___':  {'observed': 'p',        'predicted': 'expected_PFn___', 'title': 'PF Neutral', 'ylabel': 'Probability of Fixation (allele 1)'},
+    'PFbg_1':  {'observed': 'p_PFbg_1', 'predicted': 'expected_PFbg_1', 'title': 'PF Beneficial, Giant Pop (1 allele)', 'ylabel': 'Probability of Fixation (allele 1)'},
+    'PFbgw1':  {'observed': 'p',        'predicted': 'expected_PFbgw1', 'title': 'PF Beneficial, Giant Pop, Weak Selection (1 allele)', 'ylabel': 'Probability of Fixation (allele 1)'},
+    'PFb_w_':  {'observed': 'p',        'predicted': 'expected_PFb_w_', 'title': 'PF Beneficial, Weak Selection', 'ylabel': 'Probability of Fixation (allele 1)'},
+    'PF____':  {'observed': 'p',        'predicted': 'expected_PF____', 'title': 'PF Any Allele (exact)', 'ylabel': 'Probability of Fixation (allele 1)'},
+    'TFb_w1':  {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_avg_fixation_time', 'title': 'TF Beneficial, Weak Selection (1 allele)', 'ylabel': 'Generations to Fixation'},
+    'TFb_s1':  {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TFb_s1', 'title': 'TF Beneficial, Strong Selection (1 allele)', 'ylabel': 'Generations to Fixation'},
+    'TFn__1a': {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TFn__1a', 'title': 'TF Neutral (1 allele, Model A)', 'ylabel': 'Generations to Fixation'},
+    'TFn__1b': {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TFn__1b', 'title': 'TF Neutral (1 allele, Model B)', 'ylabel': 'Generations to Fixation'},
+    'TFng_1':  {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TFng_1', 'title': 'TF Neutral, Giant Pop (1 allele)', 'ylabel': 'Generations to Fixation'},
+    'TLn__1':  {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TLn__1', 'title': 'TL Neutral (1 allele)', 'ylabel': 'Generations to Loss'},
+    'TC':      {'observed': 'simulated_avg_passage_time',  'predicted': 'expected_TC', 'title': 'TC Beneficial (1/(cNe) -> 1-1/(cNe) passage time)', 'ylabel': 'Generations (passage time)'},
+    'FFT':     {'observed': None, 'predicted': None, 'title': "Fisher's Fundamental Theorem Check", 'ylabel': 'Δ(mean fitness) − Var(fitness)'},
+}
