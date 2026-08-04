@@ -1,10 +1,75 @@
+import multiprocessing
 import numpy as np
-from typing import List, Callable, Iterator, Dict
-from scipy.special import lambertw
+import os
+import sys
 import warnings
 
+from concurrent.futures import ProcessPoolExecutor
+from scipy.special import lambertw
+from typing import List, Callable, Iterator, Dict
+
+
+"""
+there are 13 analysis functions (plus some helpers)
+
+here's how the analysis functions are named / organized:
+
+functions that analyze probability of fixation start with PF
+fucntions that analyze time to fixation (assuming fixation) start with TF
+functions that analyze time to loss (assuming no fixation) start with TL
+
+then they all have a dash
+
+function designed for beneficial allele is then followed by b
+function designed for neutral allele is then followed by n
+function designed for any allele beneficialness is then followed by an underscore
+
+function designed for giant population is then followed by g
+function designed for any population size is then followed by an underscore
+(btw I know the scientific word is large but then the l for large and the l for loss would get confusing)
+
+function designed for weak selection is then followed by w
+function designed for strong selection is then followed by s
+function designed for any selection is then followed by an underscore
+
+fucntion designed for only one mutated allele to start off is followed by 1
+function designed for any number of alleles is then followed by an underscore
+
+at the end, a and b are used when there's two functions that are used for the same pop and thus had the same name otherwise
+
+that's it
+
+function that analyzes time for the beneficial allele to go from a concentration 1/(cNe) to 1-1/(cNe) is called TC
+
+the helpers are named for what they do in a straightforwrad way
+
+FFT tests Fisher's fundamental theorem
+
+"""
 #note: require wf_core.py to run! this is just the graphing part of the program
 warnings.filterwarnings("ignore")
+
+# functions for multiprocessing
+use_parallel_core_default: bool = False
+
+def is_notebook():
+    return "ipykernel" in sys.modules
+
+def initiate_executor() -> ProcessPoolExecutor:
+    if is_notebook():
+        # Notebooks need the 'fork' start method to work with ProcessPoolExecutor
+        try:
+            multiprocessing.set_start_method("fork", force=True)
+        except RuntimeError:
+            pass  # Already set
+        cfg_context = None
+    else:
+        # Scripts on Windows/macOS use 'spawn' by default, requiring a context or guard
+        cfg_context = multiprocessing.get_context("spawn")
+
+    executor = ProcessPoolExecutor(max_workers=os.cpu_count(), mp_context=cfg_context)
+
+    return executor
 
 
 class ConstantFitness:
@@ -63,9 +128,8 @@ def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]], rng=No
         t += 1
 
 
-def run_single_simulation(initial_K_counts: np.ndarray, Ff: List[Callable[[int], float]], seed=None) -> Dict:
-    local_rng = np.random.default_rng(seed)
-    history = np.vstack(list(wrightfishersampling(initial_K_counts, Ff, local_rng)))
+def run_single_simulation(initial_K_counts: np.ndarray, Ff: List[Callable[[int], float]], rng=None, seed=None) -> Dict:
+    history = np.vstack(list(wrightfishersampling(initial_K_counts, Ff, rng=rng, seed=seed)))
     N = int(initial_K_counts.sum())
 
     final_t = history.shape[0] - 1
@@ -83,15 +147,30 @@ def run_single_simulation(initial_K_counts: np.ndarray, Ff: List[Callable[[int],
     }
 
 
-def run_multiple_simulations_parallel(initial_K_counts: np.ndarray,
-                                       Ff: List[Callable[[int], float]],
-                                       num_simulations: int) -> List[Dict]:
+def run_multiple_simulations(initial_K_counts: np.ndarray,
+                             Ff: List[Callable[[int], float]],
+                             num_simulations: int,
+                             use_parallel_core=use_parallel_core_default,
+                             executor: ProcessPoolExecutor=None) -> List[Dict]:
     """Serial on purpose: this sandbox has a single CPU core, so spinning up
     a ProcessPoolExecutor would add pure overhead with zero parallel benefit.
     The simulation logic itself (run_single_simulation) is unchanged."""
+
     seed_seq = np.random.SeedSequence()
     child_seeds = seed_seq.spawn(num_simulations)
-    results = [run_single_simulation(initial_K_counts, Ff, child_seeds[i]) for i in range(num_simulations)]
+
+    if use_parallel_core:
+        if executor is None:
+            executor = initiate_executor()
+            warnings.warn("executor is uninitialized")
+        futures = [
+            executor.submit(run_single_simulation, initial_K_counts, Ff, seed=seed)
+                for seed in child_seeds
+        ]  # num_simulations
+        results = [future.result() for future in futures]
+    else:
+        results = [run_single_simulation(initial_K_counts, Ff, seed=seed) for seed in child_seeds]  # num_simulations
+
     return results
 
 
@@ -124,18 +203,17 @@ def stable_ratio(r, s1, s2):
     if r == 1:
         return s1 / (s1 + s2)
 
-    sign_r = -1.0 if r < 0 else 1.0
     ln_abs_r = np.log(np.abs(r))
 
-    sr1 = sign_r ** (s1 % 2)
-    sr2 = sign_r ** (s2 % 2)
-
-    a = s1 * ln_abs_r
-    b = -s2 * ln_abs_r
+    # Wright-Fisher (Sella-Hirsh) scaling needs a factor of 2 on the
+    # exponents — without it this is the Moran-process formula instead,
+    # which is a different process and doesn't match a WF simulation.
+    a = 2 * s1 * ln_abs_r
+    b = -2 * s2 * ln_abs_r
     m = max(a, b, 0.0)
 
-    num = sr1 * np.exp(a - m) - np.exp(-m)
-    den = sr1 * np.exp(a - m) - sr2 * np.exp(b - m)
+    num = np.exp(a - m) - np.exp(-m)
+    den = np.exp(a - m) - np.exp(b - m)
 
     if den == 0.0:
         raise ZeroDivisionError("r**s1 == r**-s2; expression is undefined for these s1, s2")
@@ -143,7 +221,7 @@ def stable_ratio(r, s1, s2):
     return num / den
 
 
-def PFn___(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def PFn___(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     fitness1 = FITNESS_FUNCTIONS[0](1)
     fitness2 = FITNESS_FUNCTIONS[1](1)
@@ -153,7 +231,7 @@ def PFn___(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     expected = size1 / N
     results['expected_PFn___'] = expected
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
     first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
     p = len(first_allele_fixations) / NUM_RUNS
     results['p'] = p
@@ -161,7 +239,7 @@ def PFn___(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def PFbg_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def PFbg_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     fitness1 = FITNESS_FUNCTIONS[0](1)
     fitness2 = FITNESS_FUNCTIONS[1](1)
@@ -170,7 +248,7 @@ def PFbg_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     expected = Psi_s(s)
     results['expected_PFbg_1'] = expected
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
     first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
     p = len(first_allele_fixations) / NUM_RUNS
     results['p_PFbg_1'] = p
@@ -178,7 +256,7 @@ def PFbg_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def PFbgw1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def PFbgw1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     fitness1 = FITNESS_FUNCTIONS[0](1)
     fitness2 = FITNESS_FUNCTIONS[1](1)
@@ -187,7 +265,7 @@ def PFbgw1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     expected = 2 * s
     results['expected_PFbgw1'] = expected
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
     first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
     p = len(first_allele_fixations) / NUM_RUNS
     results['p'] = p
@@ -195,7 +273,7 @@ def PFbgw1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def PFb_w_(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def PFb_w_(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     fitness1 = FITNESS_FUNCTIONS[0](1)
     fitness2 = FITNESS_FUNCTIONS[1](1)
@@ -210,7 +288,7 @@ def PFb_w_(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
         expected = np.nan
     results['expected_PFb_w_'] = expected
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
     first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
     p = len(first_allele_fixations) / NUM_RUNS
     results['p'] = p
@@ -218,7 +296,7 @@ def PFb_w_(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def PF____(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def PF____(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     fitness1 = FITNESS_FUNCTIONS[0](1)
     fitness2 = FITNESS_FUNCTIONS[1](1)
@@ -229,7 +307,7 @@ def PF____(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     expected = stable_ratio(r, size1, size2)
     results['expected_PF____'] = expected
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
     first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
     p = len(first_allele_fixations) / NUM_RUNS
     results['p'] = p
@@ -237,7 +315,7 @@ def PF____(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def TFb_w1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def TFb_s1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     fitness1 = FITNESS_FUNCTIONS[0](1)
     fitness2 = FITNESS_FUNCTIONS[1](1)
@@ -249,21 +327,14 @@ def TFb_w1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     p = size1 / N
     q = size2 / N
     mean_fitness = p * fitness1 + q * fitness2
-    if mean_fitness != 0:
-        Vw = p * q * (fitness1 - fitness2) ** 2 / mean_fitness ** 2
-    else:
-        Vw = np.nan
-    if Vw != -1:
-        Ne = N / (1 + Vw)
-    else:
-        Ne = np.nan
+    Ne = N
 
     c = 1
-    if np.isfinite(Ne) and s != 0 and (c * Ne - 1) > 0 and s < 1 / Ne:
+    if np.isfinite(Ne) and s != 0 and (c * Ne - 1) > 0 and s > 1 / Ne:
         expected = 2 * np.log(c * Ne - 1) / s
-    results['expected_avg_fixation_time'] = expected
+    results['expected_TFb_s1'] = expected
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
     fixed_generations = [run['final_generations'] for run in sim_data if run['first_allele_fixed']]
     simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
     results['simulated_avg_fixation_time'] = simulated_average_fixation_time
@@ -271,19 +342,20 @@ def TFb_w1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def TFb_s1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def TFb_w1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     fitness1 = FITNESS_FUNCTIONS[0](1)
     fitness2 = FITNESS_FUNCTIONS[1](1)
     s = (fitness1 - fitness2) / fitness2
+    Ne = INITIAL_ALLELE_COUNTS.sum()
 
     expected = np.nan
     c = 1
-    if s != 0 and (c * INITIAL_ALLELE_COUNTS.sum() - 1) > 0:
-        expected = 2 * np.log(c * INITIAL_ALLELE_COUNTS.sum() - 1) / s
-    results['expected_TFb_s1'] = expected
+    if np.isfinite(Ne) and s != 0 and (c * Ne - 1) > 0 and s > 1 / Ne:
+        expected = 2 * np.log(c * Ne - 1) / s
+    results['expected_TFb_w1'] = expected
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
     fixed_generations = [run['final_generations'] for run in sim_data if run['first_allele_fixed']]
     simulated_average_fixation_time = np.mean(fixed_generations) if fixed_generations else np.nan
     results['simulated_avg_fixation_time'] = simulated_average_fixation_time
@@ -291,19 +363,22 @@ def TFb_s1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def TFn__1a(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def TFn__1a(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
     N = size1 + size2
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
 
     Ne = N
     p = size1 / N
-    if p != 0:
-        expected = -1 / p * (2 * Ne * (1 - p) * np.log1p(-p))
-    else:
+    if p == 0:
         expected = 2 * Ne
+    elif p == 1:
+        expected = 0.
+    else:
+        expected = -2 * Ne * (1-p) * np.log1p(-p) / p
+
     results['expected_TFn__1a'] = expected
 
     fixed_generations = [run['final_generations'] for run in sim_data if run['first_allele_fixed']]
@@ -313,12 +388,12 @@ def TFn__1a(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def TFn__1b(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def TFn__1b(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
     N = size1 + size2
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
 
     Ne = N
     expected = -2 * N * Ne * (1 - 1 / N) * np.log1p(-1 / N)
@@ -331,12 +406,12 @@ def TFn__1b(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def TFng_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def TFng_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
     N = size1 + size2
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
 
     Ne = N
     expected = 2 * Ne
@@ -348,19 +423,22 @@ def TFng_1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def TLn__1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def TLn__1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     size1, size2 = INITIAL_ALLELE_COUNTS[0], INITIAL_ALLELE_COUNTS[1]
     N = size1 + size2
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
 
     Ne = N
-    p = size2 / N
-    if p != 1:
-        expected = -2 * Ne * (p / (1 - p)) * np.log(p)
-    else:
+    p = size1 / N
+    if p == 0:
+        expected = 0.
+    elif p == 1:
         expected = 2 * Ne
+    else:
+        expected = -2*Ne*(p/(1-p))*np.log(p)
+
     results['expected_TLn__1'] = expected
 
     fixed_generations = [run['final_generations'] for run in sim_data if run['fixed'] and not run['first_allele_fixed']]
@@ -370,7 +448,7 @@ def TLn__1(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def TC(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def TC(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     fitness1 = FITNESS_FUNCTIONS[0](1)
     fitness2 = FITNESS_FUNCTIONS[1](1)
@@ -378,7 +456,7 @@ def TC(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     N = size1 + size2
     s = (fitness1 - fitness2) / fitness2
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
 
     Ne = N
     c = 1
@@ -412,12 +490,12 @@ def TC(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
     return results
 
 
-def FFT(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS):
+def FFT(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core: bool=False, executor: ProcessPoolExecutor=None) -> List[Dict]:
     results = {}
     r1 = FITNESS_FUNCTIONS[0](1)
     r2 = FITNESS_FUNCTIONS[1](1)
 
-    sim_data = run_multiple_simulations_parallel(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS)
+    sim_data = run_multiple_simulations(INITIAL_ALLELE_COUNTS, FITNESS_FUNCTIONS, NUM_RUNS, use_parallel_core=use_parallel_core, executor=executor)
 
     all_differences = []
     for run in sim_data:
@@ -451,7 +529,7 @@ ANALYSIS_COLUMN_MAP = {
     'PFbgw1':  {'observed': 'p',        'predicted': 'expected_PFbgw1', 'title': 'PF Beneficial, Giant Pop, Weak Selection (1 allele)', 'ylabel': 'Probability of Fixation (allele 1)'},
     'PFb_w_':  {'observed': 'p',        'predicted': 'expected_PFb_w_', 'title': 'PF Beneficial, Weak Selection', 'ylabel': 'Probability of Fixation (allele 1)'},
     'PF____':  {'observed': 'p',        'predicted': 'expected_PF____', 'title': 'PF Any Allele (exact)', 'ylabel': 'Probability of Fixation (allele 1)'},
-    'TFb_w1':  {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_avg_fixation_time', 'title': 'TF Beneficial, Weak Selection (1 allele)', 'ylabel': 'Generations to Fixation'},
+    'TFb_w1':  {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TFb_w1', 'title': 'TF Beneficial, Weak Selection (1 allele)', 'ylabel': 'Generations to Fixation'},
     'TFb_s1':  {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TFb_s1', 'title': 'TF Beneficial, Strong Selection (1 allele)', 'ylabel': 'Generations to Fixation'},
     'TFn__1a': {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TFn__1a', 'title': 'TF Neutral (1 allele, Model A)', 'ylabel': 'Generations to Fixation'},
     'TFn__1b': {'observed': 'simulated_avg_fixation_time', 'predicted': 'expected_TFn__1b', 'title': 'TF Neutral (1 allele, Model B)', 'ylabel': 'Generations to Fixation'},
