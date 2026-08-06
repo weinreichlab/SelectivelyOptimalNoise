@@ -400,6 +400,428 @@ def run_multiple_simulations(
     plt.show()
 
 
+def analyze_multiple_simulations(
+    pop_size: int,
+    initial_genotypes_generator: Callable[[int], np.ndarray],
+    initial_noise_levels_generator: Callable[[int], np.ndarray],
+    generations_to_simulate: int,
+    fitness_function: Callable[[int, int], float],
+    num_simulations: int,
+    max_population_size: int = 1000 # New parameter with default
+):
+
+    all_avg_genotypes_runs = []
+    all_avg_noise_levels_runs = []
+    fixation_generations = []
+    fixed_count = 0
+
+    print(f"running {num_simulations} simulations...")
+
+    for i in range(num_simulations):
+        # run each simulation without plotting individually
+        evolution_history, fixed, fixation_gen = run_single_simulation(
+            pop_size, initial_genotypes_generator, initial_noise_levels_generator,
+            generations_to_simulate, fitness_function, plot=False, max_population_size=max_population_size
+        )
+
+        # calculate avg genotypes and noise for the current run
+        avg_genotypes_current_run = [np.mean(gen_data['genotypes']) if len(gen_data['genotypes']) > 0 else np.nan for gen_data in evolution_history]
+        avg_noise_levels_current_run = [np.mean(gen_data['noise_levels']) if len(gen_data['noise_levels']) > 0 else np.nan for gen_data in evolution_history]
+
+        all_avg_genotypes_runs.append(avg_genotypes_current_run)
+        all_avg_noise_levels_runs.append(avg_noise_levels_current_run)
+
+        if fixed:
+            fixed_count += 1
+            fixation_generations.append(fixation_gen)
+
+        if (i+1) % 100 == 0:
+            print(f"Simulation {i+1}/{num_simulations} completed. Fixation: {fixed}, Gen: {fixation_gen}")
+
+    percentage_fixed = (fixed_count / num_simulations) * 100
+    avg_fixation_gen = np.mean(fixation_generations) if fixation_generations else 0
+
+    ### PROBABILITY OF FIXATION
+
+    # NEUTRAL ALLELE, any population
+    neutral_allele_expected_probability_of_first_allele_fixation = INITIAL_ALLELE_COUNTS[0] / (
+                INITIAL_ALLELE_COUNTS[0] + INITIAL_ALLELE_COUNTS[1])
+    results[
+        'neutral_allele_expected_probability_of_first_allele_fixation'] = neutral_allele_expected_probability_of_first_allele_fixation
+
+    # BENEFICIAL ALLELE
+
+    selection_coefficient = (fitness1 - fitness2) / fitness2
+    s = selection_coefficient  # not efficient i know but it's to help me keep track, i'll fix later
+    results['s'] = s
+
+    # Beneficial allele, large population, one allele introduced
+    beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_one_allele = Psi_s(s)
+    results[
+        'beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_one_allele'] = beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_one_allele
+
+    # Beneficial allele, large population, weak selection
+    beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_weak_selection = 2 * s
+    results[
+        'beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_weak_selection'] = beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_weak_selection
+
+    # Beneficial allele, weak selection
+    denominator_weak_selection = -np.expm1(-4 * N * s)
+
+    if denominator_weak_selection != 0:
+        beneficial_allele_expected_probability_of_first_allele_fixation_weak_selection = -np.expm1(
+            -2 * s) / denominator_weak_selection
+    else:
+        beneficial_allele_expected_probability_of_first_allele_fixation_weak_selection = np.nan  # Handle division by zero
+    results[
+        'beneficial_allele_expected_probability_of_first_allele_fixation_weak_selection'] = beneficial_allele_expected_probability_of_first_allele_fixation_weak_selection
+
+    # ARBITRARY everything
+    avg_fitness = ((size1 * fitness1) + (size2 * fitness2)) / N
+    absolute_fitness = fitness1 / avg_fitness
+    W = absolute_fitness
+    r = np.log(W)
+
+    expected_probability_of_first_allele_fixation_arbitrary_parameters = np.nan
+    if r != 0:  # Check to prevent division by zero in (1/r)
+        term1_base = 1 / r
+        numerator = (1 - term1_base ** INITIAL_ALLELE_COUNTS[0])
+        denominator = (1 - term1_base ** N)
+        if denominator != 0:  # Check to prevent division by zero
+            expected_probability_of_first_allele_fixation_arbitrary_parameters = numerator / denominator
+    results[
+        'expected_probability_of_first_allele_fixation_arbitrary_parameters'] = expected_probability_of_first_allele_fixation_arbitrary_parameters
+
+    ### TIME TO FIXATION (Predictions)
+
+    c = 1
+    time_to_fixation_pred1 = np.nan
+    if s != 0 and (c * INITIAL_ALLELE_COUNTS.sum() - 1) > 0:  # Avoid division by zero and log of non-positive
+        time_to_fixation_pred1 = 2 * np.log(c * INITIAL_ALLELE_COUNTS.sum() - 1) / s
+    results['predicted_time_to_fixation_pred1'] = time_to_fixation_pred1
+
+    # N is already defined
+    p = size1 / N
+    q = size2 / N
+
+    mean_fitness = p * fitness1 + q * fitness2
+
+    Vw = 0.0
+    if mean_fitness != 0:
+        Vw = p * q * (fitness1 - fitness2) ** 2 / mean_fitness ** 2
+    else:
+        Vw = np.nan  # Handle if mean_fitness is 0
+
+    Ne = N / (1 + Vw)  # Ne will be inf if 1+Vw is 0. Handle if necessary.
+
+    time_to_fixation_pred2 = np.nan
+    if s != 0 and (c * Ne - 1) > 0 and np.isfinite(
+            Ne):  # Avoid division by zero, log of non-positive, and non-finite Ne
+        time_to_fixation_pred2 = 2 * np.log(c * Ne - 1) / s
+    results['predicted_time_to_fixation_pred2'] = time_to_fixation_pred2
+
+    results['chosen_predicted_avg_fixation_time'] = np.nan
+    if INITIAL_ALLELE_COUNTS[0] == 1 and s > 0 and np.isfinite(Ne):
+        if s < 1 / Ne:
+            results['chosen_predicted_avg_fixation_time'] = time_to_fixation_pred2
+        else:
+            results['chosen_predicted_avg_fixation_time'] = time_to_fixation_pred1
+
+    ### Now run the simulations
+    sim_data = run_multiple_simulations_parallel(initial_K_counts=INITIAL_ALLELE_COUNTS,
+                                                 Ff=FITNESS_FUNCTIONS,
+                                                 num_simulations=NUM_RUNS)
+
+    fixed_generations = [run['final_generations'] for run in sim_data if run['fixed']]
+    first_allele_fixations = [run for run in sim_data if run['first_allele_fixed']]
+
+    simulated_average_fixation_time = np.nan
+    if fixed_generations:
+        simulated_average_fixation_time = np.mean(fixed_generations)
+    results['simulated_avg_fixation_time'] = simulated_average_fixation_time
+
+    first_allele_fixation_rate = len(first_allele_fixations) / NUM_RUNS
+    results['first_allele_fixation_rate'] = first_allele_fixation_rate
+
+    current_difference = abs(first_allele_fixation_rate - neutral_allele_expected_probability_of_first_allele_fixation)
+
+    results[
+        "chosen_predicted_probability_of_first_allele_fixation"] = neutral_allele_expected_probability_of_first_allele_fixation
+
+    # there must be a more efficient way to do the next few lines but idk what yet
+    if current_difference > abs(
+            first_allele_fixation_rate - beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_one_allele):
+        results[
+            "chosen_predicted_probability_of_first_allele_fixation"] = beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_one_allele
+        current_difference = abs(
+            first_allele_fixation_rate - beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_one_allele)
+
+    if current_difference > abs(
+            first_allele_fixation_rate - beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_weak_selection):
+        results[
+            "chosen_predicted_probability_of_first_allele_fixation"] = beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_weak_selection
+        current_difference = abs(
+            first_allele_fixation_rate - beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_weak_selection)
+
+    if current_difference > abs(
+            first_allele_fixation_rate - beneficial_allele_expected_probability_of_first_allele_fixation_weak_selection):
+        results[
+            "chosen_predicted_probability_of_first_allele_fixation"] = beneficial_allele_expected_probability_of_first_allele_fixation_weak_selection
+        current_difference = abs(
+            first_allele_fixation_rate - beneficial_allele_expected_probability_of_first_allele_fixation_weak_selection)
+
+    if current_difference > abs(
+            first_allele_fixation_rate - expected_probability_of_first_allele_fixation_arbitrary_parameters):
+        results[
+            "chosen_predicted_probability_of_first_allele_fixation"] = expected_probability_of_first_allele_fixation_arbitrary_parameters
+        current_difference = abs(
+            first_allele_fixation_rate - expected_probability_of_first_allele_fixation_arbitrary_parameters)
+
+    return results
+
+
+def run_all_experiments(initial_allele_counts_list: List[np.ndarray],
+                        fitness_function_pairs: List[List[Callable[[int], float]]],
+                        num_runs: int) -> pd.DataFrame:
+    all_results = []
+    for initial_counts in initial_allele_counts_list:
+        for ff_pair in fitness_function_pairs:
+            result = run_everything(initial_counts, ff_pair, num_runs)
+            all_results.append(result)
+    return pd.DataFrame(all_results)
+
+
+def main_runner():
+    # Define the ranges for allele counts and fitness functions
+    initial_allele_counts = [
+        np.array([1, 20]), np.array([1, 1000]),
+        np.array([2, 20]), np.array([3, 1000]),
+        np.array([4, 20]), np.array([5, 1000]),
+        np.array([6, 20]), np.array([7, 1000]),
+        np.array([8, 20]), np.array([90, 1000]),
+        np.array([10, 20]), np.array([700, 1000]),
+        np.array([19, 20]), np.array([100, 1000]),
+        np.array([11, 20]), np.array([9999, 1000]),
+        np.array([3, 20]), np.array([400, 1000]),
+        np.array([3, 20]), np.array([90, 1000]),
+        np.array([12, 20]), np.array([4, 1000]),
+        np.array([3, 20]), np.array([7, 1000]),
+        np.array([2, 20]), np.array([900, 1000]),
+        np.array([1, 20]), np.array([1, 1000]),
+        np.array([2, 20]), np.array([3, 1000]),
+        np.array([4, 20]), np.array([5, 1000]),
+        np.array([6, 20]), np.array([7, 1000]),
+        np.array([8, 20]), np.array([90, 1000]),
+        np.array([10, 20]), np.array([700, 1000]),
+        np.array([19, 20]), np.array([100, 1000]),
+        np.array([11, 20]), np.array([9999, 1000]),
+        np.array([3, 20]), np.array([400, 1000]),
+        np.array([3, 20]), np.array([90, 1000]),
+        np.array([12, 20]), np.array([4, 1000]),
+        np.array([3, 20]), np.array([7, 1000]),
+        np.array([2, 20]), np.array([900, 1000])
+    ]
+
+    fitness_function_pairs = [
+        [constant_fitness_1, constant_fitness_1],
+        [constant_fitness_2, constant_fitness_1],
+        [constant_fitness_3, constant_fitness_1],
+        [constant_fitness_4, constant_fitness_1],
+        [constant_fitness_5, constant_fitness_1],
+        [constant_fitness_6, constant_fitness_1],
+        [constant_fitness_7, constant_fitness_1],
+        [constant_fitness_8, constant_fitness_1],
+        [constant_fitness_9, constant_fitness_1],
+        [constant_fitness_10, constant_fitness_1],
+        [constant_fitness_11, constant_fitness_1],
+        [constant_fitness_12, constant_fitness_1],
+        [constant_fitness_2, constant_fitness_3],
+        [constant_fitness_1, constant_fitness_2],
+        [constant_fitness_1, constant_fitness_3],
+        [constant_fitness_1, constant_fitness_4],
+        [constant_fitness_1, constant_fitness_5],
+        [constant_fitness_1, constant_fitness_6],
+        [constant_fitness_1, constant_fitness_7],
+        [constant_fitness_1, constant_fitness_8],
+        [constant_fitness_1, constant_fitness_9],
+        [constant_fitness_1, constant_fitness_10],
+        [constant_fitness_1, constant_fitness_11],
+        [constant_fitness_1, constant_fitness_12]
+    ]
+
+    NUM_RUNS = 4000
+
+    my_results = run_all_experiments(initial_allele_counts,
+                                     fitness_function_pairs,
+                                     NUM_RUNS)
+    # Convert list of dictionaries to a DataFrame
+    df = pd.DataFrame(my_results)
+
+    # Put columns in the order you want
+    column_order = [
+        "INITIAL_ALLELE_COUNTS",
+        "FITNESS_FUNCTIONS",
+        "N",
+        "s",
+        "first_allele_fixation_rate",
+        "chosen_predicted_probability_of_first_allele_fixation",
+        "neutral_allele_first_allele_fixation_rate",
+        "beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_one_allele",
+        "beneficial_allele_large_pop_expected_probability_of_first_allele_fixation_weak_selection",
+        "beneficial_allele_expected_probability_of_first_allele_fixation_weak_selection",
+        "expected_probability_of_first_allele_fixation_arbitrary_parameters",
+        "simulated_avg_fixation_time",
+        "chosen_predicted_avg_fixation_time",
+        "predicted_time_to_fixation_pred1",
+        "predicted_time_to_fixation_pred2",
+    ]
+
+    # Keep only columns that actually exist
+    column_order = [c for c in column_order if c in df.columns]
+    df = df[column_order]
+
+    # Display nicely (Jupyter Notebook)
+    styled = (
+        df.style
+        .set_caption("Simulation Results")
+        .format(precision=6)
+        .set_properties(**{
+            "text-align": "center",
+            "white-space": "normal"
+        })
+        .set_table_styles([
+            {"selector": "th",
+             "props": [
+                 ("background-color", "#2E4057"),
+                 ("color", "white"),
+                 ("font-weight", "bold"),
+                 ("text-align", "center"),
+                 ("padding", "8px")
+             ]},
+            {"selector": "td",
+             "props": [
+                 ("padding", "6px"),
+                 ("border", "1px solid #ddd")
+             ]},
+            {"selector": "caption",
+             "props": [
+                 ("font-size", "16px"),
+                 ("font-weight", "bold"),
+                 ("margin-bottom", "10px")
+             ]},
+        ])
+        .background_gradient(cmap="Blues", subset=df.select_dtypes("number").columns)
+    )
+
+    styled
+
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title="Simulation Results")
+
+    for col in df.columns:
+        table.add_column(str(col), justify="center", style="cyan")
+
+    for _, row in df.iterrows():
+        table.add_row(*[f"{x:.6g}" if isinstance(x, float) else str(x) for x in row])
+
+    Console().print(table)
+
+    df.to_html("results.html", index=False)
+
+    # Convert to DataFrame
+    df = pd.DataFrame(my_results)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+
+    # ............................................
+    # Fixation probability
+    # .............................................
+
+    prob_df = df[
+        [
+            "first_allele_fixation_rate",
+            "chosen_predicted_probability_of_first_allele_fixation",
+        ]
+    ].dropna()
+
+    obs_prob = prob_df["first_allele_fixation_rate"]
+    pred_prob = prob_df["chosen_predicted_probability_of_first_allele_fixation"]
+
+    r2_prob = r2_score(obs_prob, pred_prob)
+    mae_prob = mean_absolute_error(obs_prob, pred_prob)
+
+    lims = [
+        min(obs_prob.min(), pred_prob.min()),
+        max(obs_prob.max(), pred_prob.max()),
+    ]
+
+    axes[0].scatter(obs_prob, pred_prob, s=60)
+    axes[0].plot(lims, lims, "r--", label="Perfect prediction")
+    axes[0].set_xlim(lims)
+    axes[0].set_ylim(lims)
+    axes[0].set_xlabel("Observed fixation probability")
+    axes[0].set_ylabel("Predicted fixation probability")
+    axes[0].set_title("Fixation Probability")
+    axes[0].grid(alpha=0.3)
+
+    axes[0].text(
+        0.05,
+        0.95,
+        f"$R^2$ = {r2_prob:.3f}\nMAE = {mae_prob:.4f}",
+        transform=axes[0].transAxes,
+        verticalalignment="top",
+        bbox=dict(facecolor="white", alpha=0.8),
+    )
+
+    # ............................................
+    # Fixation time
+    # ........................................
+
+    time_df = df[
+        [
+            "simulated_avg_fixation_time",
+            "chosen_predicted_avg_fixation_time",
+        ]
+    ].dropna()
+
+    obs_time = time_df["simulated_avg_fixation_time"]
+    pred_time = time_df["chosen_predicted_avg_fixation_time"]
+
+    r2_time = r2_score(obs_time, pred_time)
+    mae_time = mean_absolute_error(obs_time, pred_time)
+
+    lims = [
+        min(obs_time.min(), pred_time.min()),
+        max(obs_time.max(), pred_time.max()),
+    ]
+
+    axes[1].scatter(obs_time, pred_time, s=60, color="darkorange")
+    axes[1].plot(lims, lims, "r--", label="Perfect prediction")
+    axes[1].set_xlim(lims)
+    axes[1].set_ylim(lims)
+    axes[1].set_xlabel("Observed fixation time")
+    axes[1].set_ylabel("Predicted fixation time")
+    axes[1].set_title("Fixation Time")
+    axes[1].grid(alpha=0.3)
+
+    axes[1].text(
+        0.05,
+        0.95,
+        f"$R^2$ = {r2_time:.3f}\nMAE = {mae_time:.3f}",
+        transform=axes[1].transAxes,
+        verticalalignment="top",
+        bbox=dict(facecolor="white", alpha=0.8),
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+
 # EXAMPLES
 
 # phenotypes first, time second in the lamda fitness functions
@@ -410,6 +832,14 @@ def default_initial_genotypes(size):
 
 def default_initial_noise_levels(size):
     return np.random.uniform(0.1, 0.5, size=size)
+
+
+
+
+
+"""
+EXAMPLES
+(commeted out because they take so long to run and we don't really need them now)
 
 print("\nExample 1: Running a single simulation with time independent fitness, increasing population")
 run_single_simulation(
@@ -499,3 +929,5 @@ run_multiple_simulations(
     num_simulations=50,
     max_population_size=1000 # Added max population size
 )
+
+"""

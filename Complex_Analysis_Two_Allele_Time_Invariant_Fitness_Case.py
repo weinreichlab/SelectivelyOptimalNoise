@@ -8,6 +8,9 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor
 from sklearn.metrics import r2_score, mean_absolute_error
 
+import traceback
+from concurrent.futures import as_completed
+
 from wf_core import (
     ANALYSIS_FUNCTIONS,
     ANALYSIS_COLUMN_MAP,
@@ -27,6 +30,7 @@ use_parallel: bool = True
 
 NUM_RUNS = 3000
 N_POINTS = 40
+QUICK_TEST = False   # True: 3 points/sweep, 50 runs/point -- finishes in minutes, catches crashes
 
 
 SWEEPS = {
@@ -36,8 +40,8 @@ SWEEPS = {
                 'sel': {'N': 5000, 's': ('log', 0.01, 2.0), 'num_runs': 20000}},
     'PFbgw1':  {'pop': {'s': 0.02, 'N': ('log', 3000, 7000), 'num_runs': 20000},
                 'sel': {'N': 5000, 's': ('log', 0.001, 0.1), 'num_runs': 20000}},
-    'PFb_w_':  {'pop': {'s': 0.01, 'N': ('log', 10, 7000),'size1': 8},
-                'sel': {'N': 300,  's': ('log', -1.0, 3.0),'size1': 8}},
+    'PFb_w_':  {'pop': {'s': 0.01, 'N': ('log', 10, 7000), 'size1': 8},
+            'sel': {'N': 300,  's': ('lin', -0.5, 3.0), 'size1': 8}},
     'PF____':  {'pop': {'s': 0.15, 'N': ('log', 10, 200),'size1': 8, 'num_runs': 20000},
                 'sel': {'N': 300,  's': ('lin', -0.2, 1.0),'size1': 20}},
     'TFb_w1':  {'pop': {'s': 0.01,'N': ('log', 10, 7000), 'num_runs': 20000},
@@ -50,12 +54,16 @@ SWEEPS = {
                 },
     'TFng_1':  {'pop': {'s': 0.0,  'N': ('log', 2000, 4000), 'num_runs': 30000},
                 },
-    'TLn__1':  {'pop': {'s': 0.0,  'N': ('log', 500, 15000), 'num_runs': 20000},
+    'TLn__1':  {'pop': {'s': 0.0,  'N': ('log', 500, 15000), 'num_runs': 40000},
                 },
-    'TC':      {'pop': {'s': 0.01,  'N': ('log', 10, 7000),'size1': 8},
-                'sel': {'N': 300,  's': ('log', 0.001, 0.1),'size1': 8}},
+    'TC':      {'pop': {'s': 0.05,  'N': ('log', 1000, 7000),'size1': 20},
+                'sel': {'N': 5000,  's': ('log', 0.005, 0.2),'size1': 20, 'num_runs': 20000}},
     'FFT':     {'pop': {'s': 0.1,  'N': ('log', 10, 2000),'size1': 8},
                 'sel': {'N': 300,  's': ('lin', -1.0, 3.0),'size1': 8}},
+    'TF__w1': {'pop': {'s': 0.01, 'N': ('log', 10, 2000), 'size1': 5, 'num_runs': 10000},
+               'sel': {'N': 300, 's': ('lin', -0.1, 0.1), 'size1': 5, 'num_runs': 10000}},
+    'TF____': {'pop': {'s': 0.05, 'N': ('log', 10, 2000), 'size1': 5, 'num_runs': 10000},
+               'sel': {'N': 300, 's': ('lin', -0.2, 1.5), 'size1': 8, 'num_runs': 10000}},
 }
 
 
@@ -67,6 +75,10 @@ Y_LIMITS = {
     ('PFbg_1', 'pop'): (0.0, 0.7),
     ('PFbgw1', 'pop'): (0.0, 0.3),
     ('PF____', 'pop'): (0.0, 1.0),
+}
+
+X_SCALES = {
+    ('TFng_1', 'pop'): 'log',
 }
 
 def make_values(spacing, lo, hi, n=N_POINTS):
@@ -104,7 +116,7 @@ def run_pop_sweep(func_name, s_fixed, N_values, initial_count=1, num_runs=NUM_RU
         r = func(K, Ff, num_runs, use_parallel_core=use_parallel_core, executor=executor)
         xs.append(N)
         if func_name == 'FFT':
-            obs.append(r['difference'])
+            obs.append(r['z_mean'])
             pred.append(0.0)
         else:
             obs.append(r.get(col['observed'], np.nan))
@@ -126,7 +138,7 @@ def run_sel_sweep(func_name, N_fixed, s_values, initial_count=1, num_runs=NUM_RU
         r = func(K, Ff, num_runs, use_parallel_core=use_parallel_core, executor=executor)
         xs.append(s)
         if func_name == 'FFT':
-            obs.append(r['difference'])
+            obs.append(r['z_mean'])
             pred.append(0.0)
         else:
             obs.append(r.get(col['observed'], np.nan))
@@ -151,7 +163,7 @@ def plot_sweep(func_name, sweep_type, xs, obs, pred, xlabel, out_path, num_runs=
             r2 = np.nan
         mae = mean_absolute_error(obs[both_mask], pred[both_mask])
 
-    scale_x = decide_scale(xs)
+    scale_x = X_SCALES.get((func_name, sweep_kind), decide_scale(xs))
     scale_y = decide_scale(np.concatenate([obs[finite_mask_obs], pred[finite_mask_pred]])) \
         if (finite_mask_obs.any() or finite_mask_pred.any()) else 'linear'
 
@@ -186,91 +198,96 @@ def plot_sweep(func_name, sweep_type, xs, obs, pred, xlabel, out_path, num_runs=
     plt.close(fig)
 
 
+REQUIRED_COLUMN_KEYS = ('observed', 'predicted', 'title', 'ylabel')
+
+
+def check_config(func_order):
+    problems = []
+    for fname in func_order:
+        if fname not in SWEEPS:
+            problems.append(f"{fname}: missing from SWEEPS")
+        col = ANALYSIS_COLUMN_MAP.get(fname)
+        if col is None:
+            problems.append(f"{fname}: missing from ANALYSIS_COLUMN_MAP")
+            continue
+        for key in REQUIRED_COLUMN_KEYS:
+            if key not in col:
+                problems.append(f"{fname}: ANALYSIS_COLUMN_MAP entry has no '{key}'")
+    if problems:
+        raise ValueError("Configuration errors:\n  " + "\n  ".join(problems))
+
+
+def build_jobs(func_order):
+    jobs, idx = [], 0
+    for fname in func_order:
+        cfg = SWEEPS[fname]
+        for kind in ('pop', 'sel'):
+            if kind not in cfg:
+                continue
+            idx += 1
+            c = cfg[kind]
+            num_runs = c.get('num_runs', NUM_RUNS)
+            if kind == 'pop':
+                values = make_values(*c['N'])
+                args = (fname, c['s'], values)
+                fn = run_pop_sweep
+                sweep_type = f"varying population size (s fixed at {c['s']})"
+                xlabel = "Population Size (N)"
+                suffix = "population_size"
+            else:
+                values = make_values(*c['s'])
+                args = (fname, c['N'], values)
+                fn = run_sel_sweep
+                sweep_type = f"varying selection coefficient s (N fixed at {c['N']})"
+                xlabel = "Selection Coefficient s = (fitness₁ − fitness₂) / fitness₂"
+                suffix = "beneficialness"
+
+            if QUICK_TEST:
+                args = args[:2] + (values[[0, len(values) // 2, -1]],)
+                num_runs = min(num_runs, 50)
+
+            jobs.append(dict(
+                fname=fname, kind=kind, fn=fn, args=args,
+                kwargs=dict(initial_count=c.get('size1', 1), num_runs=num_runs, use_parallel_core=False),
+                sweep_type=sweep_type, xlabel=xlabel,
+                out_path=os.path.join(OUT_DIR, f"{idx:02d}_{fname}_{suffix}.png"),
+            ))
+    return jobs
+
+
+def finish_job(job, get_result, failures, t0):
+    label = f"{job['fname']} ({job['kind']})"
+    try:
+        xs, obs, pred = get_result()
+        np.savez(job['out_path'].replace('.png', '.npz'), xs=xs, obs=obs, pred=pred)
+        plot_sweep(job['fname'], job['sweep_type'], xs, obs, pred, job['xlabel'], job['out_path'],
+                   num_runs=job['kwargs']['num_runs'], sweep_kind=job['kind'])
+        print(f"[{time.time() - t0:7.1f}s] done: {label} -> {job['out_path']}", flush=True)
+    except Exception:
+        print(f"[{time.time() - t0:7.1f}s] FAILED: {label}\n{traceback.format_exc()}", flush=True)
+        failures.append(label)
+
+
 def main():
     t_start = time.time()
-    idx = 0
     func_order = list(ANALYSIS_FUNCTIONS.keys())
-    with initiate_executor() as executor:
-        # generate results
-        results_pop = []
-        results_sel = []
-        futures_pop = []
-        futures_sel = []
-        # track which functions have 'sel' sweep (and order)
-        # so plotting loop can index results_sel/futures_sel properly
-        sel_func_order = []
-        out_paths_pop = {}
-        out_paths_sel = {}
-        t0 = time.time()
-        if use_parallel:
-            print("Multiprocessing pop and sel sweeps… ", flush=True)
-        for fname in func_order:
-            cfg = SWEEPS[fname]
+    check_config(func_order)                     # fails in < 1 s instead of after hours
+    jobs = build_jobs(func_order)
+    failures = []
 
-            # population size sweep
-            idx += 1
-            spacing, lo, hi = cfg['pop']['N']
-            N_values = make_values(spacing, lo, hi)
-            s_fixed = cfg['pop']['s']
-            size1_pop = cfg['pop'].get('size1', 1)
-            out_paths_pop[fname] = os.path.join(OUT_DIR, f"{idx:02d}_{fname}_population_size.png")
-            num_runs_pop = cfg['pop'].get('num_runs', NUM_RUNS)
-            if use_parallel:
-                futures_pop.append(executor.submit(run_pop_sweep, fname, s_fixed, N_values,
-                                                   initial_count=size1_pop, num_runs=num_runs_pop, use_parallel_core=False))
-            else:
-                t0 = time.time()
-                results_pop.append(run_pop_sweep(fname, s_fixed, N_values,
-                                                 initial_count=size1_pop, num_runs=num_runs_pop, use_parallel_core=False))
-                print(f"[{idx:02d}] {fname} pop sweep done in {time.time() - t0:.1f}s -> {out_paths_pop[fname]}")
+    if use_parallel:
+        print(f"Submitting {len(jobs)} sweeps…", flush=True)
+        with initiate_executor() as executor:
+            future_to_job = {executor.submit(j['fn'], *j['args'], **j['kwargs']): j for j in jobs}
+            for future in as_completed(future_to_job):
+                finish_job(future_to_job[future], future.result, failures, t_start)
+    else:
+        for j in jobs:
+            finish_job(j, lambda j=j: j['fn'](*j['args'], **j['kwargs']), failures, t_start)
 
-            # selection coefficient sweep 
-            if 'sel' in cfg:
-                idx += 1
-                spacing, lo, hi = cfg['sel']['s']
-                s_values = make_values(spacing, lo, hi)
-                N_fixed = cfg['sel']['N']
-                size1_sel = cfg['sel'].get('size1', 1)
-                out_paths_sel[fname] = os.path.join(OUT_DIR, f"{idx:02d}_{fname}_beneficialness.png")
-                sel_func_order.append(fname)
-                num_runs_pop = cfg['sel'].get('num_runs', NUM_RUNS)
-                if use_parallel:
-                    futures_sel.append(executor.submit(run_sel_sweep, fname, N_fixed, s_values,
-                                                       initial_count=size1_sel, num_runs=num_runs_pop, use_parallel_core=False))
-                else:
-                    t0 = time.time()
-                    results_sel.append(run_sel_sweep(fname, N_fixed, s_values,
-                                                     initial_count=size1_sel,num_runs=num_runs_pop, use_parallel_core=False))
-                    print(f"[{idx:02d}] {fname} sel sweep done in {time.time() - t0:.1f}s -> {out_paths_sel[fname]}")
-
-        if use_parallel:
-            results_pop = [future.result() for future in futures_pop]
-            results_sel = [future.result() for future in futures_sel]
-            print(f"Parallel pop and sel sweeps done in {time.time() - t0:.1f}s")
-
-    idx = 0
-    for k, fname in enumerate(func_order):
-        cfg = SWEEPS[fname]
-
-        # population size sweep
-        idx += 1
-        s_fixed = cfg['pop']['s']
-        xs, obs, pred = results_pop[k]
-        out_path = out_paths_pop[fname]
-        plot_sweep(fname, f"varying population size (s fixed at {s_fixed})", xs, obs, pred,
-                   "Population Size (N)", out_path, sweep_kind='pop')
-
-        # selection coefficient sweep (optional)
-        if 'sel' in cfg:
-            idx += 1
-            sel_k = sel_func_order.index(fname)
-            N_fixed = cfg['sel']['N']
-            xs, obs, pred = results_sel[sel_k]
-            out_path = out_paths_sel[fname]
-            plot_sweep(fname, f"varying selection coefficient s (N fixed at {N_fixed})", xs, obs, pred,
-                       "Selection Coefficient s = (fitness₁ − fitness₂) / fitness₂", out_path, sweep_kind='sel')
-
-    print(f"\nTotal: {idx} graphs in {time.time() - t_start:.1f}s")
+    print(f"\n{len(jobs) - len(failures)}/{len(jobs)} graphs in {time.time() - t_start:.1f}s")
+    if failures:
+        print("Failed sweeps:\n  " + "\n  ".join(failures))
 
 
 if __name__ == "__main__":

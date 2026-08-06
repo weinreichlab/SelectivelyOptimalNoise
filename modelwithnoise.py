@@ -519,7 +519,7 @@ def run_multiple_simulations(
         plt.plot(generations_axis_plot, overall_avg_genotypes, color='green', linewidth=1, label='Mean Genotype')
     plt.xlabel("Generation")
     plt.ylabel("Average Genotype")
-    plt.title("Overall Evolution of Average Genotype (Multiple Runs)")
+    plt.title("Evolution of Average Genotype")
     plt.grid(True)
     plt.legend()
 
@@ -532,7 +532,7 @@ def run_multiple_simulations(
         plt.plot(generations_axis_plot, overall_avg_noise_levels, color='red', linewidth=1, label='Mean Noise Level')
     plt.xlabel("Generation")
     plt.ylabel("Average Noise Level")
-    plt.title("Overall Evolution of Average Noise Level (Multiple Runs)")
+    plt.title("Evolution of Average Noise Level")
     plt.grid(True)
     plt.legend()
 
@@ -550,7 +550,7 @@ def run_multiple_simulations(
         plt.plot(generations_axis_plot, overall_avg_fitness_levels, color='darkgreen', linewidth=1, label='Mean Fitness (W)')
     plt.xlabel("Generation")
     plt.ylabel("Average Fitness (W)")
-    plt.title("Overall Evolution of Average Fitness (Multiple Runs)")
+    plt.title("Evolution of Average Absolute Wrightian Fitness")
     plt.grid(True)
     plt.legend()
 
@@ -562,11 +562,29 @@ def run_multiple_simulations(
 
 # define how to generate initial genotypes and noise levels for default simulation
 def default_initial_genotypes(size):
-    return np.random.uniform(-10.0, 10.0, size=size)
+    return np.random.uniform(20.0, 30.0, size=size)
 
 def default_initial_noise_levels(size):
-    return np.random.uniform(0.01, 0.2, size=size)
+    return np.random.uniform(0.05, 0.3, size=size)
 
+if __name__ == "__main__":
+    print("\nExample")
+    _ = run_multiple_simulations(
+        pop_size=100,
+        initial_genotypes_generator=default_initial_genotypes,
+        initial_noise_levels_generator=default_initial_noise_levels,
+        generations_to_simulate=500,
+        Wopt=1000.0,
+        num_simulations=100,
+        max_population_size=1000,
+        stop_on_fitness_plateau=False,
+        plateau_window_size=20,
+        plateau_threshold=0.005,
+        constant_mu=None,
+        constant_population_size=False
+    )
+
+"""
 print("\nExample 1: single simulation with mutation in amount of noise")
 _ = run_single_simulation(
     pop_size=100,
@@ -629,3 +647,4 @@ _ = run_multiple_simulations(
     constant_mu=0.1,
     constant_population_size=True
 )
+"""
