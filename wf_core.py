@@ -87,9 +87,7 @@ class ConstantFitness:
         return f"ConstantFitness({self.value})"
 
 
-# ---------------------------------------------------------------------------
-# Core simulation (unchanged in logic from the user's original code)
-# ---------------------------------------------------------------------------
+
 
 def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]], rng=None, seed=None) -> Iterator[np.ndarray]:
     if rng is None:
@@ -109,6 +107,7 @@ def wrightfishersampling(K: np.ndarray, Ff: List[Callable[[int], float]], rng=No
         raise ValueError("K must be at least 1")
 
     t = 0
+    #while True:
     while True:
         yield K
         if np.max(K) == N:
@@ -152,9 +151,7 @@ def run_multiple_simulations(initial_K_counts: np.ndarray,
                              num_simulations: int,
                              use_parallel_core=use_parallel_core_default,
                              executor: ProcessPoolExecutor=None) -> List[Dict]:
-    """Serial on purpose: this sandbox has a single CPU core, so spinning up
-    a ProcessPoolExecutor would add pure overhead with zero parallel benefit.
-    The simulation logic itself (run_single_simulation) is unchanged."""
+
 
     seed_seq = np.random.SeedSequence()
     child_seeds = seed_seq.spawn(num_simulations)
@@ -174,14 +171,10 @@ def run_multiple_simulations(initial_K_counts: np.ndarray,
     return results
 
 
-# named constants kept for compatibility / debugging
 def constant_fitness_1(t):
     return 1.0
 
 
-# ---------------------------------------------------------------------------
-# 13 analysis functions (unchanged math from the user's original code)
-# ---------------------------------------------------------------------------
 
 def Psi_s(s: float) -> float:
     res = 1 + lambertw(-(1 + s) * np.exp(-(1 + s))).real / (s + 1)
@@ -191,6 +184,13 @@ def Psi_s(s: float) -> float:
         if np.isnan(res):
             res = 0.
     return res
+
+"""
+import sympy as sp
+Psi, s = sp.symbols('Psi s', real=True)
+sp.solve(sp.Eq(1 - Psi, sp.exp(-(1+s) * Psi)), Psi)
+[s + sp.LambertW((-s - 1)*sp.exp(-s - 1)) + 1)/(s + 1)]
+"""
 
 
 def stable_ratio(r, s1, s2):
@@ -205,9 +205,6 @@ def stable_ratio(r, s1, s2):
 
     ln_abs_r = np.log(np.abs(r))
 
-    # Wright-Fisher (Sella-Hirsh) scaling needs a factor of 2 on the
-    # exponents — without it this is the Moran-process formula instead,
-    # which is a different process and doesn't match a WF simulation.
     a = 2 * s1 * ln_abs_r
     b = -2 * s2 * ln_abs_r
     m = max(a, b, 0.0)
@@ -519,10 +516,7 @@ ANALYSIS_FUNCTIONS = {
     'TFng_1': TFng_1, 'TLn__1': TLn__1, 'TC': TC, 'FFT': FFT,
 }
 
-# Note: fixed a bug from the original ANALYSIS_COLUMN_MAP -- PFbg_1 actually
-# stores its simulated probability under 'p_PFbg_1', not 'p'. Using 'p' (as
-# the original map did) silently produced NaN/missing observed values for
-# every PFbg_1 row in the original table/plot code.
+
 ANALYSIS_COLUMN_MAP = {
     'PFn___':  {'observed': 'p',        'predicted': 'expected_PFn___', 'title': 'PF Neutral', 'ylabel': 'Probability of Fixation (allele 1)'},
     'PFbg_1':  {'observed': 'p_PFbg_1', 'predicted': 'expected_PFbg_1', 'title': 'PF Beneficial, Giant Pop (1 allele)', 'ylabel': 'Probability of Fixation (allele 1)'},

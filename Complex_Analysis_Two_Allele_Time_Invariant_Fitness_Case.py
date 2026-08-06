@@ -37,9 +37,9 @@ SWEEPS = {
     'PFbgw1':  {'pop': {'s': 0.02, 'N': ('log', 3000, 7000), 'num_runs': 20000},
                 'sel': {'N': 5000, 's': ('log', 0.001, 0.1), 'num_runs': 20000}},
     'PFb_w_':  {'pop': {'s': 0.01, 'N': ('log', 10, 7000),'size1': 8},
-                'sel': {'N': 300,  's': ('log', 0.001, 0.1),'size1': 8}},
+                'sel': {'N': 300,  's': ('log', -1.0, 3.0),'size1': 8}},
     'PF____':  {'pop': {'s': 0.15, 'N': ('log', 10, 200),'size1': 8, 'num_runs': 20000},
-                'sel': {'N': 300,  's': ('lin', 0.001, 3.0),'size1': 8}},
+                'sel': {'N': 300,  's': ('lin', -0.2, 1.0),'size1': 20}},
     'TFb_w1':  {'pop': {'s': 0.01,'N': ('log', 10, 7000), 'num_runs': 20000},
                 'sel': {'N': 300,  's': ('log', 0.001, 0.1), 'num_runs': 20000}},
     'TFb_s1':  {'pop': {'s': 2.0,  'N': ('log', 10, 7000), 'num_runs': 20000},
@@ -196,9 +196,8 @@ def main():
         results_sel = []
         futures_pop = []
         futures_sel = []
-        # track which functions actually have a 'sel' sweep, and in what order,
-        # so the plotting loop below can index results_sel/futures_sel correctly
-        # even though some functions skip 'sel' entirely.
+        # track which functions have 'sel' sweep (and order)
+        # so plotting loop can index results_sel/futures_sel properly
         sel_func_order = []
         out_paths_pop = {}
         out_paths_sel = {}
@@ -208,7 +207,7 @@ def main():
         for fname in func_order:
             cfg = SWEEPS[fname]
 
-            # population size sweep (always present)
+            # population size sweep
             idx += 1
             spacing, lo, hi = cfg['pop']['N']
             N_values = make_values(spacing, lo, hi)
@@ -225,7 +224,7 @@ def main():
                                                  initial_count=size1_pop, num_runs=num_runs_pop, use_parallel_core=False))
                 print(f"[{idx:02d}] {fname} pop sweep done in {time.time() - t0:.1f}s -> {out_paths_pop[fname]}")
 
-            # selection coefficient sweep (optional -- skip if 'sel' not in cfg)
+            # selection coefficient sweep 
             if 'sel' in cfg:
                 idx += 1
                 spacing, lo, hi = cfg['sel']['s']
